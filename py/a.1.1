@@ -1,0 +1,48 @@
+# Python code for Students Performance technical statistics
+
+import pandas as pd
+import numpy as np
+from scipy import stats
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 1. 데이터 로드 및 전처리
+df = pd.read_csv('your_path.csv')  # 파일 경로 수정
+# 결측치 확인
+print("결측치 개수:\n", df.isnull().sum())
+# 범주형 인코딩
+df['gender_code'] = df['gender'].map({'male': 0, 'female': 1})
+
+# 2. 기술통계량 계산
+desc = df[['math score','reading score','writing score']].describe(
+    percentiles=[.25, .5, .75])
+print("\n=== 기술통계량 요약 ===\n", desc.T)
+
+# 3. 성별에 따른 t-검정
+male = df[df['gender_code']==0]
+female = df[df['gender_code']==1]
+ttest_results = {}
+for col in ['math score','reading score','writing score']:
+    t_stat, p_val = stats.ttest_ind(
+        male[col], female[col], equal_var=False)
+    ttest_results[col] = (t_stat, p_val)
+print("\n=== t-검정 결과 ===")
+for subject, (t, p) in ttest_results.items():
+    print(f"{subject}: t={t:.2f}, p={p:.3f}")
+
+# 4. 시각화
+plt.figure(figsize=(12,4))
+for i,col in enumerate(['math score','reading score','writing score'],1):
+    plt.subplot(1,3,i)
+    sns.boxplot(x='gender', y=col, data=df)
+    plt.title(f"{col} by Gender")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12,4))
+for i,col in enumerate(['math score','reading score','writing score'],1):
+    plt.subplot(1,3,i)
+    sns.histplot(df[col], bins=20, kde=True)
+    plt.title(f"{col} Distribution")
+plt.tight_layout()
+plt.show()
