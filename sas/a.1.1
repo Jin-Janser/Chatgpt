@@ -1,0 +1,31 @@
+/* SAS code for Students Performance technical statistics */
+
+/* 1. 데이터 로드 및 전처리 */
+proc import datafile="your_path.csv" out=students dbms=csv replace;
+  guessingrows=MAX;
+run;
+data students;
+  set students;
+  gender_code = (gender='female');
+run;
+proc means data=students n mean median std p25 p75 min max;
+  var math_score reading_score writing_score;
+run;
+
+/* 3. 성별에 따른 t-검정 */
+proc ttest data=students;
+  class gender_code;
+  var math_score reading_score writing_score;
+run;
+
+/* 4. 시각화 */
+proc sgplot data=students;
+  vbox math_score / category=gender;
+  title "Math Score by Gender";
+run;
+proc sgplot data=students;
+  histogram math_score / nbins=20;
+  density math_score;
+  title "Math Score Distribution";
+run;
+/* 읽기/쓰기 과목도 유사하게 생성 가능 */
