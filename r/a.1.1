@@ -1,0 +1,37 @@
+# R code for Students Performance technical statistics
+
+library(tidyverse)
+
+# 1. 데이터 로드 및 전처리
+df <- read.csv('your_path.csv')
+sum(is.na(df))  # 결측치 개수 확인
+df <- df %>%
+  mutate(gender_code = ifelse(gender == "male", 0, 1))
+
+# 2. 기술통계량 계산
+desc_stats <- df %>%
+  summarise_at(vars(math.score, reading.score, writing.score),
+               list(mean=mean, median=median, sd=sd, 
+                    Q1=~quantile(.,0.25), Q3=~quantile(.,0.75),
+                    min=min, max=max))
+print(desc_stats)
+
+# 3. 성별별 t-검정
+tt_math <- t.test(math.score ~ gender_code, data=df, var.equal=FALSE)
+tt_read <- t.test(reading.score ~ gender_code, data=df, var.equal=FALSE)
+tt_write<- t.test(writing.score ~ gender_code, data=df, var.equal=FALSE)
+print(tt_math); print(tt_read); print(tt_write)
+
+# 4. 시각화
+df %>% 
+  pivot_longer(cols=c(math.score,reading.score,writing.score),
+               names_to="subject", values_to="score") %>%
+  ggplot(aes(x=gender, y=score)) +
+  geom_boxplot() + facet_wrap(~subject) + theme_minimal()
+
+df %>%
+  pivot_longer(cols=c(math.score,reading.score,writing.score),
+               names_to="subject", values_to="score") %>%
+  ggplot(aes(x=score)) +
+  geom_histogram(bins=20, fill="skyblue", color="white") +
+  facet_wrap(~subject) + theme_minimal()
