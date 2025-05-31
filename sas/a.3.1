@@ -1,0 +1,155 @@
+/* 1. 데이터 로드 및 전처리 */
+/* CSV 파일 경로를 필요에 따라 수정하세요 */
+proc import datafile="iris.csv" out=iris dbms=csv replace;
+  getnames=yes;
+run;
+
+/* 이상치(IQR×1.5) 확인 및 제거 */
+proc univariate data=iris noprint;
+  var SepalLength SepalWidth PetalLength PetalWidth;
+  output out=iqr pctlpts=25 75 pctlpre=P25_ P75_;
+run;
+
+data iris_clean;
+  if _N_=1 then set iqr;
+  set iris;
+  array X{4} SepalLength SepalWidth PetalLength PetalWidth;
+  array P25{4} P25_SepalLength P25_SepalWidth P25_PetalLength P25_PetalWidth;
+  array P75{4} P75_SepalLength P75_SepalWidth P75_PetalLength P75_PetalWidth;
+  do i=1 to 4;
+    iqr = P75{i} - P25{i};
+    if X{i} < P25{i}-1.5*iqr or X{i} > P75{i}+1.5*iqr then delete;
+  end;
+  drop P25_: P75_: i iqr;
+run;
+
+/* 네 연속형 변수 Z-점수 표준화 */
+proc standard data=iris_clean mean=0 std=1 out=iris_std;
+  var SepalLength SepalWidth PetalLength PetalWidth;
+run;
+
+/* 2. 주성분 분석 (PCA) */
+proc princomp data=iris_std out=pca_scores outstat=pca_stat;
+  var SepalLength SepalWidth PetalLength PetalWidth;
+run;
+
+/* 스크리 플롯 생성 */
+proc sgplot data=pca_stat(where=(_TYPE_='EIGENVAL'));
+  series x=_N_ y=Prin1 / markers lineattrs=(thickness=2 color=navy);
+  xaxis label='Principal Component' values=(1 to 4);
+  yaxis label='Eigenvalue';
+  title 'Scree Plot of PCA';
+run;
+
+/* 변수 기여도 (PC1·PC2 loadings) 출력 */
+proc print data=pca_stat(where=(_TYPE_='PATTERN')) noobs;
+  var _NAME_ Prin1 Prin2;
+  title 'PCA Loadings for PC1 and PC2';
+run;
+
+/* 3. 군집 분석 */
+/* 3.1 K-means (k=3) */
+proc fastclus data=iris_std maxclusters=3 out=km_out;
+  var SepalLength SepalWidth PetalLength PetalWidth;
+run;
+
+/* 3.2 계층적 군집 (Ward linkage) */
+proc cluster data=iris_std method=ward outtree=tree noprint;
+  var SepalLength SepalWidth PetalLength PetalWidth;
+run;
+proc tree data=tree nclusters=3 out=hc_out noprint;
+run;
+
+/* 클러스터 할당 병합 */
+data clusters;
+  merge iris_std km_out(keep=_CLUSTER_ rename=(_CLUSTER_=KMeansCluster))
+        hc_out(keep=_CLUSTER_ rename=(_CLUSTER_=HierCluster));
+  by _N_;
+run;
+
+/* 4. 군집 품질 평가: 실루엣 계수 및 Dunn 지수 */
+/* 거리 행렬 계산 */
+proc distance data=iris_std method=euclid out=DistMat;
+  var interval(SepalLength SepalWidth PetalLength PetalWidth);
+run;
+
+/* IML을 이용해 실루엣과 Dunn 계산 */
+proc iml;
+  use DistMat; read all var _NUMERIC_ into D;      /* 거리 행렬 */
+  use clusters; read all var {KMeansCluster};     /* K-means labels */
+  n = nrow(D);
+  /* 실루엣 계수 계산 함수 */
+  start silhouette(labels);
+    sil = j(n,1,0);
+    do i=1 to n;
+      group = labels[i];
+      a = D[i,loc(labels=group)];  a = a[ , labels=group<>i];
+      b = j(1,1,1e6);
+      do g=unique(labels);
+        if g ^= group then do;
+          distg = D[i,loc(labels=g)];
+          b = min(b, min(distg));
+        end;
+      end;
+      sil[i] = (b - mean(a)) / max(b, mean(a));
+    end;
+    return sil;
+  finish;
+  /* Dunn index 계산 함수 */
+  start dunn(labels);
+    groups = unique(labels);
+    k = ncol(groups);
+    /* intra-cluster maximum distance */
+    max_intra = 0;
+    do g=1 to k;
+      idx = loc(labels=groups[g]);
+      if ncol(idx)>1 then do;
+        intrad = max(D[idx,idx]);
+        max_intra = max(max_intra, intrad);
+      end;
+    end;
+    /* inter-cluster minimum distance */
+    min_inter = 1e6;
+    do i=1 to k-1;
+      idx1 = loc(labels=groups[i]);
+      do j=i+1 to k;
+        idx2 = loc(labels=groups[j]);
+        interd = min(D[idx1,idx2]);
+        min_inter = min(min_inter, interd);
+      end;
+    end;
+    return(min_inter/max_intra);
+  finish;
+  /* K-means 품질 */
+  sil_k = silhouette(clusters[,1]);
+  dunn_k = dunn(clusters[,1]);
+  /* Hierarchical 품질 */
+  sil_h = silhouette(clusters[,2]);
+  dunn_h = dunn(clusters[,2]);
+  /* 요약 출력 */
+  print "K-means" sil_k[+]/n dunn_k[colname="DunnIndex"];
+  print "Hierarchical" sil_h[+]/n dunn_h;
+quit;
+
+/* 5. PCA 공간에 클러스터 오버레이 시각화 */
+data viz;
+  set pca_scores;
+  if _N_ <= nrow(clusters) then do;
+    KMeans = clusters.KMeansCluster;
+    Hier = clusters.HierCluster;
+  end;
+run;
+
+proc sgplot data=viz;
+  scatter x=Prin1 y=Prin2 / group=KMeans markerattrs=(symbol=circlefilled) 
+          legendlabel="K-means Cluster";
+  title 'PCA: K-means Clusters Overlay';
+  xaxis label="PC1 Score"; yaxis label="PC2 Score";
+run;
+
+proc sgplot data=viz;
+  scatter x=Prin1 y=Prin2 / group=Hier markerattrs=(symbol=trianglefilled) 
+          legendlabel="Hierarchical Cluster";
+  title 'PCA: Hierarchical Clusters Overlay';
+  xaxis label="PC1 Score"; yaxis label="PC2 Score";
+run;
