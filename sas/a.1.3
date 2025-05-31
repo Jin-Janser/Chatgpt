@@ -1,0 +1,111 @@
+/* 1. 데이터 로드 및 전처리 */
+proc import datafile="WHO_vaccine.csv" out=vax dbms=csv replace;
+  getnames=yes;
+run;
+
+/* 결측치 다중대체(MICE) */
+proc mi data=vax nimpute=5 out=mi_vax;
+  var Coverage_Rate;
+run;
+data vax2;
+  set mi_vax;
+  if _Imputation_ > 1 then delete; /* 대체 후 첫 번째 완전 데이터만 사용 */
+run;
+
+/* 이상치 제거(IQR) */
+proc univariate data=vax2 noprint;
+  var Coverage_Rate;
+  output out=qt pctlpts=25 75 pctlpre=P_;
+run;
+data vax3;
+  if _N_=1 then set qt;
+  set vax2;
+  iqr = P_75 - P_25;
+  if Coverage_Rate < (P_25 - 1.5*iqr) or Coverage_Rate > (P_75 + 1.5*iqr) then delete;
+run;
+
+/* 그룹별 기술통계 */
+proc means data=vax3 n mean std;
+  class Region Vaccine_Type;
+  var Coverage_Rate;
+run;
+
+/* 2. Task 1: Levene 등분산성 & Welch t-검정 */
+proc glm data=vax3(where=(Vaccine_Type='DTP3'));
+  class Region;
+  model Coverage_Rate = Region;
+  means Region / hovtest=levene welch;
+  ods output HomogeneityTests=LeveneTest 
+             WelchTest=WelchTest 
+             Means=MeanStats;
+run;
+
+/* Cohen's d 계산 */
+data CohensD;
+  set MeanStats;
+  if Region='A' then meanA=Mean;
+  if Region='B' then meanB=Mean;
+run;
+data CohensD;
+  merge CohensD(where=(Region='A')) 
+        CohensD(where=(Region='B'));
+  d = (meanA - meanB) / sqrt((StdDevA**2 + StdDevB**2)/2);
+  keep d;
+run;
+proc print data=CohensD; run;
+
+/* 3. Task 2: MCV1 선형회귀 & 만-켄달 검정 */
+/* 선형회귀 */
+proc reg data=vax3(where=(Vaccine_Type='MCV1' and Country='Country_X'));
+  model Coverage_Rate = Year / clb;
+  ods output FitStatistics=FitStats ParmEst=ParmEst;
+run; quit;
+/* Kendall τ */
+proc corr data=vax3(where=(Vaccine_Type='MCV1' and Country='Country_X'))
+          kendall;
+  var Coverage_Rate;
+  with Year;
+run;
+
+/* 4. Task 3: Bartlett → ANOVA → Tukey HSD */
+/* 등분산성 검정(Bartlett) */
+proc glm data=vax3(where=(Vaccine_Type in ('BCG','DTP3','MCV1')));
+  class Vaccine_Type;
+  model Coverage_Rate = Vaccine_Type;
+  means Vaccine_Type / hovtest=bartlett;
+  ods output ModelANOVA=ANOVA TukeyHSD=Tukey;
+run;
+
+/* η² 계산 */
+data ANOVA2;
+  set ANOVA;
+  if Source='Vaccine_Type' then do;
+    eta2 = SS / (SS + SSError);
+    keep eta2;
+  end;
+run;
+proc print data=ANOVA2; run;
+
+/* 5. 시각화 */
+/* Boxplot */
+proc sgplot data=vax3(where=(Vaccine_Type='DTP3'));
+  vbox Coverage_Rate / category=Region;
+  title 'DTP3 Coverage by Region';
+run;
+
+/* Trend Plot */
+proc sgplot data=vax3(where=(Vaccine_Type='MCV1' and Country='Country_X'));
+  reg x=Year y=Coverage_Rate / clm=both;
+  title 'Country\_X MCV1 Trend with 95% CI';
+run;
+
+/* Heatmap of Tukey p-values */
+data Heat;
+  set Tukey;
+  keep _GROUP_ _GROUP2_ Prob;
+run;
+proc sgplot data=Heat;
+  heatmapparm x=_GROUP_ y=_GROUP2_ colorresponse=Prob / colormodel=(white red);
+  gradlegend / title='p-value';
+  title 'Tukey HSD p-values Heatmap';
+run;
