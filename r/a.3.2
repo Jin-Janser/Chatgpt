@@ -1,0 +1,122 @@
+#--- 패키지 설치 (필요시 주석 해제) ---#
+# install.packages(c("tidyverse","sf","spdep","brms","CARBayes","loo","bayesplot","tmap"))
+
+library(tidyverse)
+library(sf)
+library(spdep)
+library(brms)
+library(CARBayes)
+library(loo)
+library(bayesplot)
+library(tmap)
+
+# 1. 데이터 로딩 및 전처리
+seer <- read.csv("seer_cancer.csv")  # 경로 수정
+# 결측치 다중대체 (mice 생략, 단순 제거 예시)
+seer <- seer %>% drop_na(cases,population)
+# 이상치 제거: IQR×1.5 기준
+num <- c("cases","population")
+seer <- seer %>% 
+  filter(between(cases, quantile(cases,0.25)-1.5*IQR(cases),
+                       quantile(cases,0.75)+1.5*IQR(cases)))
+# 범주형 변환 및 오프셋
+seer <- seer %>%
+  mutate(
+    region_id = factor(region_id),
+    age = factor(age_group, levels=c("20-39","40-59","60-79","80+")),
+    race = factor(race, levels=c("White","Black","Hispanic","Asian")),
+    log_pop = log(population)
+  )
+
+# 공간 가중치 행렬 생성 (Queen's contiguity)
+coords <- seer %>% distinct(region_id, lon, lat) %>% arrange(region_id)
+nb <- poly2nb(st_as_sf(coords, coords=c("lon","lat"), crs=4326), queen=TRUE)
+Wnb <- nb2listw(nb, style="W")
+
+# 2. 계층적 베이지안 모델 (brms)
+priors <- c(
+  prior(normal(0,5), class="Intercept"),
+  prior(normal(0,1), class="b"),
+  prior(exponential(1), class="sd")
+)
+model_hier <- brm(
+  cases | trials(population) ~ age + race + (1|region_id),
+  family = binomial(link="logit"),
+  data = seer,
+  prior = priors,
+  chains=4, iter=2000, warmup=1000, cores=4,
+  control=list(adapt_delta=0.95)
+)
+# 수렴 진단
+print(rhat(model_hier)); print(neff_ratio(model_hier))
+
+# 3. 공간적 CAR 모델 (CARBayes)
+seer_agg <- seer %>%
+  group_by(region_id, lon, lat) %>%
+  summarise(
+    cases=sum(cases), population=sum(population),
+    age=first(age), race=first(race), .groups="drop"
+  )
+Wmat <- nb2mat(nb, style="B", zero.policy=TRUE)
+set.seed(42)
+car_model <- S.CARleroux(
+  formula = cases ~ age + race,
+  family  = "binomial",
+  data    = seer_agg,
+  W       = Wmat,
+  burnin  = 5000, n.sample=10000, thin=10,
+  prior.mean.beta=0, prior.var.beta=1000,
+  prior.tau2=c(1,0.01), prior.nu2=c(1,0.01)
+)
+# 공간 모델 요약
+print(car_model$modelfit)
+rho_post <- car_model$samples$rho
+tau2_post <- car_model$samples$tau2
+
+# 4. 모델 비교 (WAIC, LOO)
+waic_hier <- waic(model_hier)
+loo_hier <- loo(model_hier)
+# CARBayes는 DIC
+dic_car <- car_model$modelfit["DIC"]
+waic_car <- NA; loo_car <- NA
+
+model_comp <- tibble(
+  Model=c("Hierarchical","Spatial CAR"),
+  WAIC=c(waic_hier$estimates["waic","Estimate"], waic_car),
+  LOO =c(loo_hier$estimates["loo","Estimate"], loo_car),
+  DIC =c(NA, dic_car)
+)
+print(model_comp)
+
+# 5. 시각화
+
+# 5.1 지역별 공간 효과 지도
+region_eff <- data.frame(
+  region_id = as.integer(names(car_model$random.effects)),
+  phi_mean  = car_model$random.effects
+)
+gdf <- left_join(coords, region_eff, by="region_id") %>%
+  st_as_sf(coords=c("lon","lat"), crs=4326)
+
+tm_shape(gdf) +
+  tm_bubbles(size="phi_mean", col="phi_mean",
+             palette="Reds", title.size="Spatial Effect",
+             title.col="Spatial Effect") +
+  tm_layout(title="CAR Spatial Random Effects")
+
+# 5.2 인구통계학적 위험비 (Odds Ratios)
+fe_hier <- fixef(model_hier)
+or_df <- data.frame(
+  Parameter = rownames(fe_hier)[-1],
+  OR        = exp(fe_hier[-1,"Estimate"]),
+  CI_low    = exp(fe_hier[-1,"Q2.5"]),
+  CI_high   = exp(fe_hier[-1,"Q97.5"])
+)
+ggplot(or_df, aes(x=reorder(Parameter,OR), y=OR)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=CI_low,ymax=CI_high), width=0.2) +
+  geom_hline(yintercept=1, linetype="dashed", color="gray") +
+  coord_flip() +
+  labs(title="Fixed Effects: Odds Ratios",
+       x="", y="Odds Ratio (95% CrI)") +
+  theme_minimal()
