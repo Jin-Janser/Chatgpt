@@ -1,0 +1,155 @@
+# 필요한 패키지 로드
+library(dplyr)
+library(ggplot2)
+library(KernSmooth)    # dpik 대역폭 선택[8]
+library(boot)          # 부트스트랩
+library(DescTools)     # Gini, Atkinson[11]
+library(quantreg)      # 분위 회귀[22]
+
+set.seed(123)
+n <- 5000
+
+# 가상 데이터 생성
+edu_levels <- c("High School","Bachelor","Master","PhD")
+edu_mult <- c(1.0,1.4,1.8,2.3)
+
+df <- tibble(
+  gender = sample(c("Male","Female"), n, TRUE, c(0.52,0.48)),
+  education = factor(sample(edu_levels, n, TRUE, c(0.4,0.35,0.2,0.05)),
+                     levels=edu_levels),
+  experience = pmin(pmax(rnorm(n,10,5),0),40),
+  income = 30000 * edu_mult[education] * (1 + 0.02*experience) *
+           rlnorm(n, 0, 0.4)
+)
+
+# 결측치 2% 부여 후 제거
+df$income[sample(n, n*0.02)] <- NA
+df <- df %>% drop_na(income)
+
+# 파생 변수
+df <- df %>%
+  mutate(
+    log_income = log(income),
+    edu_years = case_when(
+      education=="High School"~12,
+      education=="Bachelor"~16,
+      education=="Master"   ~18,
+      education=="PhD"      ~22
+    ),
+    male = as.integer(gender=="Male")
+  )
+
+# 요약
+df %>% summarize(
+  N = n(),
+  MeanIncome = mean(income),
+  MedianIncome = median(income)
+)
+
+# 최적 대역폭 계산 함수
+opt_bw <- function(x) dpik(x, kernel="normal")
+
+# 전체 및 그룹별 대역폭
+bw_overall <- opt_bw(df$log_income)
+bw_gender  <- tapply(df$log_income, df$gender, opt_bw)
+bw_edu     <- tapply(df$log_income, df$education, opt_bw)
+
+# KDE 추정 함수
+get_kde <- function(x,bw){
+  d <- density(x, bw=bw, kernel="gaussian")
+  data.frame(x=d$x, y=d$y)
+}
+
+# 성별 KDE
+kde_gender <- bind_rows(
+  lapply(names(bw_gender), function(g){
+    get_kde(df$log_income[df$gender==g], bw_gender[g]) %>%
+      mutate(group=g)
+  })
+)
+
+# 교육수준 KDE
+kde_edu <- bind_rows(
+  lapply(names(bw_edu), function(e){
+    get_kde(df$log_income[df$education==e], bw_edu[e]) %>%
+      mutate(group=e)
+  })
+)
+
+# 대역폭 표
+bandwidths <- list(
+  Overall = bw_overall,
+  Gender  = bw_gender,
+  Education = bw_edu
+)
+print(bandwidths)
+
+# 3.1 불평등 지수 부트스트랩
+ineq_fun <- function(data, i){
+  x <- data[i]
+  c(Gini = Gini(x, unbiased=FALSE),
+    Atk  = Atkinson(x, parameter=0.5))
+}
+
+boot_res <- boot(df$income, ineq_fun, R=1000)
+ci_gini     <- boot.ci(boot_res, type="perc", index=1)$percent[4:5]
+ci_atkinson <- boot.ci(boot_res, type="perc", index=2)$percent[4:5]
+
+ineq_table <- tibble(
+  Measure     = c("Gini","Atkinson"),
+  Estimate    = c(boot_res$t0[1], boot_res$t0[2]),
+  CI_Lower    = c(ci_gini[1], ci_atkinson[1]),
+  CI_Upper    = c(ci_gini[2], ci_atkinson[2])
+)
+print(ineq_table)
+
+# 3.2 분위 회귀 및 OLS
+X <- model.matrix(~ edu_years + experience + male, df)
+y <- df$log_income
+
+ols_model <- lm(y ~ X - 1)
+qr_models <- lapply(c(0.1,0.5,0.9), function(tau){
+  rq(y ~ X - 1, tau=tau)
+})
+names(qr_models) <- c("Q10","Q50","Q90")
+
+# 결과 표
+res_list <- list(OLS=ols_model, qr_models)
+res_df <- bind_rows(
+  lapply(names(res_list), function(m){
+    mod <- res_list[[m]]
+    coef <- coef(summary(mod))
+    tibble(
+      Model    = m,
+      Variable = rownames(coef),
+      Coef     = coef[,"Estimate"],
+      StdErr   = coef[,"Std. Error"],
+      p_value  = coef[,"Pr(>|t|)"]
+    )
+  }), .id = NULL
+)
+print(res_df)
+
+# 5.1 KDE 시각화 예시
+ggplot(kde_gender, aes(x, y, color=group)) +
+  geom_line(size=1) +
+  labs(title="Gender-wise Log-Income KDE",
+       x="Log Income", y="Density") +
+  theme_minimal()
+
+# 5.2 불평등 지수 시각화
+ggplot(ineq_table, aes(Measure, Estimate)) +
+  geom_col(fill="steelblue") +
+  geom_errorbar(aes(ymin=CI_Lower, ymax=CI_Upper), width=0.2) +
+  labs(title="Income Inequality Indices", y="Value") +
+  theme_classic()
+
+# 5.3 분위 회귀 계수 비교
+coef_plot_df <- res_df %>%
+  filter(Variable!="(Intercept)") %>%
+  ggplot(aes(x=Variable, y=Coef, fill=Model)) +
+  geom_bar(stat="identity", position="dodge") +
+  labs(title="Quantile vs OLS Coefficients",
+       y="Coefficient", x="Variable") +
+  theme_bw()
+print(coef_plot_df)
