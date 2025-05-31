@@ -1,0 +1,55 @@
+/* 1. 데이터 로드 및 전처리 */
+proc import datafile="train.csv" out=housing dbms=csv replace;
+  getnames=yes;
+run;
+
+data housing;
+  set housing;
+  RemodelAge = YearRemodAdd - YearBuilt;
+  TotalSF    = GrLivArea + TotalBsmtSF;
+run;
+
+/* 결측치 처리: MICE(단일 대체 예시) */
+proc mi data=housing nimpute=1 out=housing_imp;
+  var _numeric_;
+run;
+
+/* 범주형 최빈값 대체 */
+proc stdize data=housing_imp out=housing2 reponly method=mode;
+  var _character_;
+run;
+
+/* 2. VIF 기반 변수 선택 및 다중공선성 제거 */
+proc reg data=housing2 outest=est;
+  model SalePrice = OverallQual GrLivArea GarageCars TotalBsmtSF RemodelAge TotalSF / vif;
+run;
+
+/* 3. 단계적 회귀모델 */
+proc glmselect data=housing2 plots=all;
+  model SalePrice = OverallQual GrLivArea GarageCars TotalBsmtSF RemodelAge TotalSF
+                    MSZoning Neighborhood LotFrontage
+                  / selection=stepwise(select=SL) slentry=0.01 slstay=0.01;
+  output out=pred p=pred lclm=lcl uclm=ucl;
+run;
+
+/* 4. 진단 플롯 */
+proc reg data=housing2;
+  model SalePrice = OverallQual GrLivArea GarageCars TotalBsmtSF RemodelAge TotalSF / 
+       dwprob stb;
+  output out=resid r=resid p=pred;
+run;
+proc sgplot data=resid;
+  scatter x=pred y=resid; refline 0 / axis=y lineattrs=(color=red);
+  title "Residuals vs Fitted";
+run;
+proc sgplot data=resid;
+  qqplot resid / normal(mu=est sigma=est);
+  title "Q-Q Plot of Residuals";
+run;
+proc sgplot data=resid;
+  loess y=resid x=pred / nomarkers;
+  title "Smoothed Partial Regression Plot";
+run;
+
+/* 5. SHAP 값 유사 구현 (Approx.) */
+/* SAS에 직접 SHAP 없음, Python 연동 권장 */
