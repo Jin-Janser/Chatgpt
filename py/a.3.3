@@ -1,0 +1,99 @@
+# 필요한 라이브러리 설치(필요 시 주석 해제)
+# !pip install pandas numpy matplotlib lifelines seaborn
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from lifelines import KaplanMeierFitter, CoxPHFitter
+from lifelines.statistics import logrank_test
+
+# 1. 데이터 로딩 및 전처리
+# df = pd.read_csv('train.csv')  # 자신의 경로에 맞춰 수정
+df = pd.read_csv('https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv')
+
+# 결측치 처리: Age 중앙값, Embarked 최빈값
+df['Age'].fillna(df['Age'].median(), inplace=True)
+df['Embarked'].fillna(df['Embarked'].mode()[0], inplace=True)
+
+# 범주형 인코딩
+df['Sex'] = df['Sex'].map({'male':0, 'female':1})
+df['Pclass'] = df['Pclass'].astype('category')
+df['Embarked'] = df['Embarked'].astype('category')
+
+# 로그 변환할 변수 확인 (Fare에 로그 스케일 적용)
+df['log_Fare'] = np.log1p(df['Fare'])
+
+# 생존분석용 컬럼명 통일
+df['T'] = df['Age']  # 생존 시간: 여기에 Age 대신 실제 생존시간 데이터가 있으면 사용
+df['E'] = df['Survived']
+
+# 2. Kaplan–Meier 추정 및 로그-순위 검정
+kmf = KaplanMeierFitter()
+
+# (a) 성별별 생존 곡선
+plt.figure(figsize=(8,5))
+for sex_val, label in [(0,'Male'), (1,'Female')]:
+    mask = df['Sex']==sex_val
+    kmf.fit(df.loc[mask,'T'], df.loc[mask,'E'], label=label)
+    kmf.plot_survival_function(ci_show=False)
+results_sex = logrank_test(
+    df.loc[df.Sex==0,'T'], df.loc[df.Sex==1,'T'],
+    event_observed_A=df.loc[df.Sex==0,'E'], event_observed_B=df.loc[df.Sex==1,'E']
+)
+plt.title('Kaplan–Meier Survival by Sex\np-value = {:.3f}'.format(results_sex.p_value))
+plt.xlabel('Time (Age)')
+plt.ylabel('Survival probability')
+plt.legend()
+plt.show()
+
+# (b) Pclass별 생존 곡선
+plt.figure(figsize=(8,5))
+for cls in sorted(df.Pclass.unique()):
+    mask = df['Pclass']==cls
+    kmf.fit(df.loc[mask,'T'], df.loc[mask,'E'], label=f'Class {cls}')
+    kmf.plot_survival_function(ci_show=False)
+results_p1_p3 = logrank_test(
+    df.loc[df.Pclass==1,'T'], df.loc[df.Pclass==3,'T'],
+    event_observed_A=df.loc[df.Pclass==1,'E'], event_observed_B=df.loc[df.Pclass==3,'E']
+)
+plt.title('Kaplan–Meier Survival by Pclass\n1 vs 3 p-value = {:.3f}'.format(results_p1_p3.p_value))
+plt.xlabel('Time (Age)')
+plt.ylabel('Survival probability')
+plt.legend()
+plt.show()
+
+# 3. Cox Proportional Hazards 모델
+cph = CoxPHFitter()
+covariates = ['Pclass','Sex','T','SibSp','Parch','log_Fare']
+# CoxPH는 'duration_col'과 'event_col' 지정
+data_for_cox = df[['T','E','Pclass','Sex','SibSp','Parch','log_Fare']].copy()
+cph.fit(data_for_cox, duration_col='T', event_col='E', show_progress=False)
+# 결과표 출력
+cox_summary = cph.summary[['coef','exp(coef)','se(coef)','p','exp(coef) lower 95%','exp(coef) upper 95%']]
+cox_summary.columns = ['coef','HR','se(coef)','p','HR_lower95','HR_upper95']
+print(cox_summary)
+
+# 비례위험 가정 진단
+print("\n=== PH Assumption Check ===")
+ph_check = cph.check_assumptions(data_for_cox, p_value_threshold=0.05, show_plots=False)
+
+# 4. 특정 프로필 생존 확률 예측 및 시각화
+profile = pd.DataFrame({
+    'T': [0],
+    'E': [0],
+    'Pclass': pd.Categorical([1], categories=[1,2,3]),
+    'Sex': [1],       # female
+    'SibSp': [0],
+    'Parch': [0],
+    'log_Fare': [np.log1p(df.loc[df.Pclass==1,'Fare'].median())]
+})
+surv_func = cph.predict_survival_function(profile, times=np.linspace(0, df['T'].max(), 100))
+plt.figure(figsize=(7,5))
+plt.plot(surv_func.index, surv_func.iloc[:,0], lw=2)
+plt.title('Predicted Survival for 30yo Female, 1st Class')
+plt.xlabel('Time (Age)')
+plt.ylabel('Survival probability')
+plt.ylim(0,1)
+plt.grid(True)
+plt.show()
