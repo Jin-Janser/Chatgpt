@@ -1,0 +1,158 @@
+#── 1. 라이브러리 로드 ───────────────────────────────────────────────────────────
+# install.packages(c("brms","tidyverse","bayesplot","loo"))
+library(brms)        # Bayesian 모델링
+library(tidyverse)   # 데이터 전처리·시각화
+library(bayesplot)   # MCMC 진단·시각화
+library(loo)         # LOO-CV/WAIC
+
+#── 2. 데이터 로딩 및 전처리 ───────────────────────────────────────────────────
+# CSV 파일 경로를 작업 환경에 맞게 수정하세요
+red  <- read.csv("winequality-red.csv",  sep=";")
+white<- read.csv("winequality-white.csv",sep=";")
+
+wine <- bind_rows(red, white) %>% 
+  mutate(type = factor(if_else(row_number() <= nrow(red), "red","white")))
+
+# 결측치 확인(없음을 가정)
+sum(is.na(wine))  
+
+# 이상치(IQR×1.5) 제거
+wine_clean <- wine %>% 
+  filter(across(.cols = names(.)[1:11],               # 첫 11개 화학 변수
+                .fns  = ~ between(.,
+                                 quantile(.,.25)-1.5*IQR(.),
+                                 quantile(.,.75)+1.5*IQR(.)))) %>% 
+  drop_na()
+
+# 독립변수 11개 Z-점수 표준화
+features <- names(wine_clean)[1:11]
+wine_scaled <- wine_clean %>% 
+  mutate(across(all_of(features), scale)) %>% 
+  mutate(quality = as.numeric(quality))
+
+# 품질 등급 분포 요약
+table(wine_scaled$quality)
+
+#── 3. 사전분포 민감도 분석: Flat vs Weakly Informative priors ──────────────
+# 3.1 비정보적(Flat) prior 모델
+flat_priors <- c(
+  prior(normal(0,10), class="b"),
+  prior(normal(0,10), class="Intercept"),
+  prior(exponential(1), class="sigma")
+)
+
+fit_flat <- brm(
+  quality ~ . - type,                      # type 제외
+  data = wine_scaled,
+  prior = flat_priors,
+  chains = 4, iter = 4000, warmup = 2000,
+  control = list(adapt_delta = 0.95),
+  seed = 42,
+  file = "fit_flat"
+)
+
+# 3.2 약정보적(Weak) prior 모델
+weak_priors <- c(
+  prior(normal(0,1), class="b"),
+  prior(normal(5,1), class="Intercept"),   # quality 평균 근처
+  prior(exponential(1), class="sigma")
+)
+
+fit_weak <- brm(
+  quality ~ . - type,
+  data = wine_scaled,
+  prior = weak_priors,
+  chains = 4, iter = 4000, warmup = 2000,
+  control = list(adapt_delta = 0.95),
+  seed = 42,
+  file = "fit_weak"
+)
+
+#── 4. 기본·horseshoe·상호작용 모델 구축 ────────────────────────────────────
+# 4.1 기본 모델 (Weak priors로 재활용)
+fit_basic <- fit_weak
+
+# 4.2 변수 선택 모델 (Horseshoe prior)
+hs_priors <- c(
+  prior(horseshoe(), class="b"),
+  prior(normal(0,5), class="Intercept"),
+  prior(exponential(1), class="sigma")
+)
+
+fit_hs <- brm(
+  quality ~ . - type,
+  data = wine_scaled,
+  prior = hs_priors,
+  chains = 4, iter = 4000, warmup = 2000,
+  control = list(adapt_delta = 0.99),
+  file = "fit_hs"
+)
+
+# 4.3 상호작용 모델 (alcohol × volatile acidity)
+fit_int <- brm(
+  quality ~ (.)^2 - type -   # 모든 일차항 + 모든 이차항
+             pH:type,        # type과 pH interaction 예시 제외
+  data = wine_scaled,
+  prior = weak_priors,
+  chains = 4, iter = 4000, warmup = 2000,
+  control = list(adapt_delta = 0.95),
+  file = "fit_int"
+)
+
+#── 5. 모델 비교: WAIC · LOO-CV ────────────────────────────────────────────────
+loo_flat  <- loo(fit_flat,  moment_match = TRUE)
+loo_weak  <- loo(fit_weak,  moment_match = TRUE)
+loo_hs    <- loo(fit_hs,    moment_match = TRUE)
+loo_int   <- loo(fit_int,   moment_match = TRUE)
+
+# WAIC도 계산 가능
+waic_flat <- waic(fit_flat); waic_weak <- waic(fit_weak)
+waic_hs   <- waic(fit_hs);   waic_int  <- waic(fit_int)
+
+# LOO 비교 및 가중치
+loo_comp <- loo_compare(loo_flat, loo_weak, loo_hs, loo_int)
+model_weights <- model_weights(fit_flat, fit_weak, fit_hs, fit_int, weights="loo")
+
+#── 6. 결과 요약 출력 ────────────────────────────────────────────────────────
+# 사후 분포 요약표 (기본 모델 예시)
+print(summary(fit_weak)$fixed[, c("Estimate","Est.Error","l-95% CI","u-95% CI","Rhat")])
+
+# 사전분포 민감도 비교표
+flat_sum <- summary(fit_flat)$fixed
+weak_sum <- summary(fit_weak)$fixed
+sens_df <- tibble(
+  Parameter = rownames(flat_sum),
+  Flat_Mean = flat_sum[, "Estimate"],
+  Flat_CI   = paste0("[", round(flat_sum[, "l-95% CI"],2), ",", round(flat_sum[, "u-95% CI"],2), "]"),
+  Weak_Mean = weak_sum[, "Estimate"],
+  Weak_CI   = paste0("[", round(weak_sum[, "l-95% CI"],2), ",", round(weak_sum[, "u-95% CI"],2), "]"),
+  Mean_Diff = round(abs(flat_sum[, "Estimate"] - weak_sum[, "Estimate"]), 3)
+)
+print(sens_df)
+
+# 모델 비교 결과표
+print(data.frame(
+  Model = c("Flat","Weak","Horseshoe","Interaction"),
+  LOO_ELPD = c(loo_flat$estimates["elpd_loo","Estimate"],
+               loo_weak$estimates["elpd_loo","Estimate"],
+               loo_hs$estimates["elpd_loo","Estimate"],
+               loo_int$estimates["elpd_loo","Estimate"]),
+  WAIC     = c(waic_flat$estimates["waic","Estimate"],
+               waic_weak$estimates["waic","Estimate"],
+               waic_hs$estimates["waic","Estimate"],
+               waic_int$estimates["waic","Estimate"]),
+  Weight   = as.numeric(model_weights)
+))
+
+#── 7. 시각화 예시 ──────────────────────────────────────────────────────────
+# 7.1 회귀계수 사후 분포
+mcmc_areas(as.matrix(fit_weak, pars=features), 
+           prob=0.95) +
+  ggtitle("Posterior 95% CI for Coefficients (Weak Prior)") +
+  ylab("Features")
+
+# 7.2 LOO Pareto k 진단
+plot(loo_flat, label_points=TRUE) + ggtitle("LOO Pareto k Diagnostic (Flat)")
+
+# 7.3 Posterior Predictive Check
+pp_check(fit_weak) + ggtitle("Posterior Predictive Check (Weak Prior)")
