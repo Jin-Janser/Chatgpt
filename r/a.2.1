@@ -1,0 +1,48 @@
+library(tidyverse)
+library(mice)
+library(cattonum)   # Target Encoding
+library(car)        # vif
+library(broom)
+library(shapr)
+library(ggplot2)
+library(gridExtra)
+
+# 1) 데이터 로드 및 전처리
+df <- read.csv('train.csv') %>% select(-Id)
+num <- df %>% select_if(is.numeric) %>% select(-SalePrice)
+cat <- df %>% select_if(is.character)
+
+imp <- mice(df[num], m=1, method='pmm', seed=0)
+df[num] <- complete(imp)
+
+df[cat] <- df[cat] %>% map_df(~ ifelse(is.na(.), Mode(.), .))
+df <- df %>%
+  mutate(RemodelAge = YearRemodAdd - YearBuilt,
+         TotalSF = GrLivArea + TotalBsmtSF)
+
+te <- apply_target_encoder(df[cat], target = df$SalePrice)
+df[cat] <- te$encoded
+
+# 2) VIF 계산
+mod_full <- lm(SalePrice ~ ., data=df)
+vifs <- vif(mod_full)
+sel <- names(vifs[vifs < 5])
+sel <- c('SalePrice', sel)
+
+# 3) 최종 모델
+model <- lm(reformulate(sel[-1], 'SalePrice'), data=df)
+summary(model)
+
+# 4) 진단 플롯
+p1 <- car::crPlots(model, main='Partial Regression')
+p2 <- ggplot(data.frame(resid=residuals(model)), aes(sample=resid)) +
+      stat_qq() + stat_qq_line() + ggtitle('Q-Q Plot')
+p3 <- ggplot(model, aes(.fitted, .resid)) +
+      geom_point(alpha=0.5) + geom_hline(yintercept=0, col='red') +
+      xlab('Fitted')+ylab('Residuals')+ggtitle('Residual vs Fitted')
+grid.arrange(p1, p2, p3, ncol=2)
+
+# 5) SHAP 값
+explainer <- shapr(as.matrix(df[sel[-1]]), model)
+shap <- explain(as.matrix(df[sel[-1]]), explainer, approach='empirical')
+plot_summary(shap)
