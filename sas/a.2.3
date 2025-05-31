@@ -1,0 +1,131 @@
+/* 1. 데이터 로드 및 병합 */
+proc import datafile="winequality-red.csv"
+    out=red dbms=csv replace;
+    getnames=yes;
+run;
+
+proc import datafile="winequality-white.csv"
+    out=white dbms=csv replace;
+    getnames=yes;
+run;
+
+/* red/white 구분 변수 추가 및 병합 */
+data wine;
+    set red(in=R) white(in=W);
+    if R then type=0;          /* red = 0 */
+    else if W then type=1;     /* white = 1 */
+run;
+
+/* 2. 독립변수 표준화 (Z-점수) */
+proc standard data=wine out=wine_std mean=0 std=1;
+    var fixed_acidity 
+        volatile_acidity 
+        citric_acid 
+        residual_sugar 
+        chlorides 
+        free_sulfur_dioxide 
+        total_sulfur_dioxide 
+        density 
+        pH 
+        sulphates 
+        alcohol;
+run;
+
+/* 3. 비정보적 사전분포 모델 (Flat prior) */
+ods graphics on;
+proc mcmc data=wine_std nbi=10000 nmc=20000 seed=12345
+          outpost=post_flat diag=all statistics=summary dic;
+    /* 회귀계수 및 분산 파라미터 선언 */
+    parms alpha beta1-beta11 sigma2;
+    /* 사전분포 설정 */
+    prior alpha       ~ normal(0, var=1e6);
+    prior beta1-beta11 ~ normal(0, var=1e6);
+    prior sigma2      ~ igamma(shape=0.01, scale=0.01);
+
+    /* 선형 예측자 */
+    mu = alpha
+       + beta1*fixed_acidity
+       + beta2*volatile_acidity
+       + beta3*citric_acid
+       + beta4*residual_sugar
+       + beta5*chlorides
+       + beta6*free_sulfur_dioxide
+       + beta7*total_sulfur_dioxide
+       + beta8*density
+       + beta9*pH
+       + beta10*sulphates
+       + beta11*alcohol;
+
+    /* 우도 함수 */
+    model quality ~ normal(mu, var=sigma2);
+run;
+ods graphics off;
+
+/* 4. 약정보적 사전분포 모델 (Normal(0,1) prior) */
+ods graphics on;
+proc mcmc data=wine_std nbi=10000 nmc=20000 seed=12345
+          outpost=post_weak diag=all statistics=summary dic;
+    parms alpha beta1-beta11 sigma2;
+    prior alpha       ~ normal(0, var=1);
+    prior beta1-beta11 ~ normal(0, var=1);
+    prior sigma2      ~ igamma(shape=2, scale=1);
+
+    mu = alpha
+       + beta1*fixed_acidity
+       + beta2*volatile_acidity
+       + beta3*citric_acid
+       + beta4*residual_sugar
+       + beta5*chlorides
+       + beta6*free_sulfur_dioxide
+       + beta7*total_sulfur_dioxide
+       + beta8*density
+       + beta9*pH
+       + beta10*sulphates
+       + beta11*alcohol;
+
+    model quality ~ normal(mu, var=sigma2);
+run;
+ods graphics off;
+
+/* 5. 상호작용 모델: alcohol × volatile_acidity */
+data wine_int;
+    set wine_std;
+    alc_vol = alcohol * volatile_acidity;
+run;
+
+ods graphics on;
+proc mcmc data=wine_int nbi=10000 nmc=20000 seed=12345
+          outpost=post_int diag=all statistics=summary dic;
+    parms alpha beta1-beta12 sigma2;
+    prior alpha       ~ normal(0, var=1);
+    prior beta1-beta12 ~ normal(0, var=1);
+    prior sigma2      ~ igamma(shape=2, scale=1);
+
+    mu = alpha
+       + beta1*fixed_acidity
+       + beta2*volatile_acidity
+       + beta3*citric_acid
+       + beta4*residual_sugar
+       + beta5*chlorides
+       + beta6*free_sulfur_dioxide
+       + beta7*total_sulfur_dioxide
+       + beta8*density
+       + beta9*pH
+       + beta10*sulphates
+       + beta11*alcohol
+       + beta12*alc_vol;
+
+    model quality ~ normal(mu, var=sigma2);
+run;
+ods graphics off;
+
+/* 6. 사후분포 요약 및 DIC 비교 */
+proc print data=post_flat(obs=1 keep=DIC)    label="DIC (Flat)"; run;
+proc print data=post_weak(obs=1 keep=DIC)    label="DIC (Weak)"; run;
+proc print data=post_int(obs=1 keep=DIC)     label="DIC (Interaction)"; run;
+
+/* 7. 사후분포 요약 테이블 */
+proc means data=post_weak mean std p2.5 p97.5;
+    var alpha beta1-beta11;
+    title "Posterior Summary (Weakly Informative Prior)";
+run;
