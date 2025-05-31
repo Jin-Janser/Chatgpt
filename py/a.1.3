@@ -1,0 +1,65 @@
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+
+# 데이터 로드 및 전처리
+df = pd.read_csv('WHO_vaccine.csv', parse_dates=['Year'])
+df = df[['Country','Region','Year','Vaccine_Type','Coverage_Rate']].dropna()
+# 이상치 제거 (IQR)
+Q1 = df['Coverage_Rate'].quantile(0.25)
+Q3 = df['Coverage_Rate'].quantile(0.75)
+IQR = Q3 - Q1
+df = df[(df['Coverage_Rate'] >= Q1-1.5*IQR) & (df['Coverage_Rate'] <= Q3+1.5*IQR)]
+
+# 그룹별 기술통계
+groups = df.groupby(['Region','Vaccine_Type'])['Coverage_Rate']
+print(groups.agg(['mean','std','count']))
+
+# 2) Task 1: DTP3 t-검정
+a = df[(df.Region=='A') & (df.Vaccine_Type=='DTP3')]['Coverage_Rate']
+b = df[(df.Region=='B') & (df.Vaccine_Type=='DTP3')]['Coverage_Rate']
+levene_p = stats.levene(a,b).pvalue
+t_stat, p_val = stats.ttest_ind(a, b, equal_var=False)
+# Cohen's d
+d = (a.mean()-b.mean())/np.sqrt(((a.std()**2 + b.std()**2)/2))
+print(f"Levene p={levene_p:.3f}, t={t_stat:.2f}, p={p_val:.3f}, d={d:.2f}")
+
+# 박스플롯
+plt.figure()
+sns.boxplot(x='Region', y='Coverage_Rate', data=df[df.Vaccine_Type=='DTP3'])
+plt.title('DTP3 Coverage by Region')
+plt.show()
+
+# 3) Task 2: MCV1 추세 분석
+country = 'Country_X'
+mc = df[(df.Country==country) & (df.Vaccine_Type=='MCV1')]
+slope, intercept, r, p, _ = stats.linregress(mc.Year.dt.year, mc.Coverage_Rate)
+print(f"β₁={slope:.2f}, p={p:.3f}, R²={r**2:.2f}")
+# 만-켄달
+tau, p_k = stats.kendalltau(mc.Year.dt.year, mc.Coverage_Rate)
+print(f"Kendall τ={tau:.2f}, p={p_k:.3f}")
+# 추세선 시각화
+sns.regplot(x=mc.Year.dt.year, y='Coverage_Rate', data=mc, ci=95)
+plt.title(f'{country} MCV1 Trend')
+plt.show()
+
+# 4) Task 3: ANOVA & Tukey
+sub = df[df.Vaccine_Type.isin(['BCG','DTP3','MCV1'])]
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+model = ols('Coverage_Rate ~ Vaccine_Type', data=sub).fit()
+anova = sm.stats.anova_lm(model, typ=1)
+eta2 = anova['sum_sq'][0]/(anova['sum_sq'].sum())
+print(anova)
+print(f"η²={eta2:.2f}")
+tukey = pairwise_tukeyhsd(sub.Coverage_Rate, sub.Vaccine_Type)
+print(tukey)
+# 히트맵
+res = pd.DataFrame(data=tukey._results_table.data[1:], columns=tukey._results_table.data[0])
+pivot = res.pivot('group1','group2','p-adj')
+sns.heatmap(pivot, annot=True, cmap='coolwarm', vmin=0, vmax=0.05)
+plt.title('Tukey HSD p-values')
+plt.show()
