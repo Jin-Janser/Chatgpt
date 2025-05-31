@@ -1,0 +1,146 @@
+import numpy as np
+import pandas as pd
+
+# 재현성 설정
+np.random.seed(42)
+n = 5000
+
+# 가상 변수 생성
+df = pd.DataFrame({
+    'gender': np.random.choice(['Male','Female'], n, p=[0.52,0.48]),
+    'education': np.random.choice(['High School','Bachelor','Master','PhD'], 
+                                  n, p=[0.4,0.35,0.2,0.05]),
+    'experience': np.clip(np.random.normal(10,5,n), 0, 40)
+})
+
+# 교육 수준별 소득 배율
+edu_mult = {'High School':1.0,'Bachelor':1.4,'Master':1.8,'PhD':2.3}
+
+# 소득 생성 및 로그 변환
+df['income'] = (30000 
+                * df['education'].map(edu_mult) 
+                * (1 + 0.02*df['experience']) 
+                * np.random.lognormal(0,0.4,n))
+df.loc[df.sample(frac=0.02).index,'income'] = np.nan  # 2% 결측
+df.dropna(subset=['income'], inplace=True)
+df['log_income'] = np.log(df['income'])
+
+# 교육 수준 수치화
+edu_years = {'High School':12,'Bachelor':16,'Master':18,'PhD':22}
+df['edu_years'] = df['education'].map(edu_years)
+df['male'] = (df['gender']=='Male').astype(int)
+
+print("전처리 후 데이터 크기:", df.shape)
+print(df[['income','gender','education','experience']].head())
+
+from sklearn.neighbors import KernelDensity
+from sklearn.model_selection import GridSearchCV
+
+def optimal_bw(x):
+    grid = GridSearchCV(KernelDensity(kernel='gaussian'),
+                        {'bandwidth':np.linspace(0.1,1.0,20)},
+                        cv=5)
+    grid.fit(x[:,None])
+    return grid.best_params_['bandwidth']
+
+# 전체 로그 소득에 대한 대역폭
+bw_overall = optimal_bw(df['log_income'].values)
+
+import numpy as np
+
+def compute_kde(group_series, bw):
+    kde = KernelDensity(bandwidth=bw, kernel='gaussian')
+    kde.fit(group_series[:,None])
+    x = np.linspace(group_series.min(), group_series.max(), 200)
+    log_dens = kde.score_samples(x[:,None])
+    return x, np.exp(log_dens)
+
+# 성별별 KDE
+bw_gender = {g: optimal_bw(df[df['gender']==g]['log_income'].values) 
+             for g in df['gender'].unique()}
+kde_gender = {g: compute_kde(df[df['gender']==g]['log_income'].values, bw) 
+              for g,bw in bw_gender.items()}
+
+# 교육수준별 KDE
+bw_edu = {e: optimal_bw(df[df['education']==e]['log_income'].values) 
+          for e in df['education'].unique()}
+kde_edu = {e: compute_kde(df[df['education']==e]['log_income'].values, bw) 
+           for e,bw in bw_edu.items()}
+from scipy.stats import gmean
+
+def gini(x):
+    x = np.sort(x)
+    n = len(x)
+    return (2*np.sum((np.arange(1,n+1)*x)))/(n*np.sum(x)) - (n+1)/n
+
+def atkinson(x, eps=0.5):
+    x = x[x>0]
+    m = np.mean(x)
+    if eps==1:
+        return 1 - gmean(x)/m
+    return 1 - (np.mean(x**(1-eps))**(1/(1-eps)))/m
+
+def bootstrap_ci(x, func, n_boot=1000):
+    stats = [func(np.random.choice(x,len(x),True)) for _ in range(n_boot)]
+    return np.percentile(stats,[2.5,97.5])
+
+overall = df['income'].values
+g0, ci_g = gini(overall), bootstrap_ci(overall,gini)
+a0, ci_a = atkinson(overall), bootstrap_ci(overall,atkinson)
+
+ineq_table = pd.DataFrame([
+    ['Gini', g0, ci_g[0], ci_g[1]],
+    ['Atkinson (ε=0.5)', a0, ci_a[0], ci_a[1]]
+], columns=['Measure','Estimate','CI Lower','CI Upper'])
+
+import statsmodels.api as sm
+from statsmodels.regression.quantile_regression import QuantReg
+
+X = sm.add_constant(df[['edu_years','experience','male']])
+y = df['log_income']
+
+# OLS
+ols = sm.OLS(y,X).fit()
+
+# Quantile regression
+quantiles = [0.1,0.5,0.9]
+qr_results = {}
+for q in quantiles:
+    mod = QuantReg(y, X).fit(q=q)
+    qr_results[q] = mod
+
+# 결과 표 작성
+rows = []
+for label,model in [('OLS',ols)]+[(f'Q{int(q*100)}',qr_results[q]) for q in quantiles]:
+    for term, coef in model.params.items():
+        if term=='const': continue
+        se = model.bse[term]
+        p = model.pvalues[term]
+        rows.append([label,term,coef,se,p])
+qr_table = pd.DataFrame(rows, columns=['Model','Variable','Coef','StdErr','p-value'])
+
+# df = pd.read_csv('train.csv')  # 실제 BLS 데이터셋 경로로 수정
+
+import matplotlib.pyplot as plt
+# 성별 KDE 시각화
+plt.figure(figsize=(8,4))
+for g,(x,d) in kde_gender.items():
+    plt.plot(x, d, label=g)
+plt.title('Log-Income KDE by Gender')
+plt.xlabel('Log Income'); plt.ylabel('Density')
+plt.legend(); plt.show()
+
+# 교육 수준 KDE 시각화
+plt.figure(figsize=(8,4))
+for e,(x,d) in kde_edu.items():
+    plt.plot(x, d, label=e)
+plt.title('Log-Income KDE by Education'); plt.xlabel('Log Income')
+plt.ylabel('Density'); plt.legend(); plt.show()
+
+print(qr_table.pivot(index='Variable', columns='Model', values=['Coef','p-value']))
+
+# 분위별 회귀 계수 비교 시각화
+coef_df = qr_table.pivot(index='Variable', columns='Model', values='Coef')
+coef_df.plot(kind='bar', figsize=(8,4))
+plt.title('Quantile vs OLS Coefficients'); plt.ylabel('Coefficient')
+plt.xticks(rotation=0); plt.legend(title='Model'); plt.show()
