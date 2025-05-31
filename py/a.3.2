@@ -1,0 +1,114 @@
+#--- 라이브러리 설치(주석 해제) ---#
+# !pip install pymc3 arviz geopandas libpysal
+
+import numpy as np
+import pandas as pd
+import pymc3 as pm
+import arviz as az
+from libpysal.weights import Queen
+from sklearn.preprocessing import LabelEncoder
+
+# 1. 데이터 로딩 및 전처리
+# df = pd.read_csv('seer_cancer.csv')
+# (실제 데이터가 없으므로 가상 데이터프레임 사용)
+np.random.seed(42)
+n_regions = 50
+years = np.arange(2010, 2020)
+ages = ['20-39','40-59','60-79','80+']
+races = ['White','Black','Hispanic','Asian']
+records = []
+for r in range(n_regions):
+    lat, lon = np.random.uniform(32,48), np.random.uniform(-125,-70)
+    for y in years:
+        for age in ages:
+            for race in races:
+                pop = np.random.poisson(5000)+500
+                rate = 50 + 20*np.sin(lat*np.pi/180)
+                age_eff = 2.0 if age=='80+' else 1.5 if age=='60-79' else 1.0
+                race_eff = 1.3 if race=='Black' else 1.0
+                lam = rate * age_eff * race_eff * pop / 1e5
+                cases = np.random.poisson(lam)
+                records.append([r,lat,lon,y,age,race,cases,pop])
+df = pd.DataFrame(records, columns=[
+    'region','lat','lon','year','age','race','cases','pop'
+])
+# 결측치·이상치 처리
+df = df.dropna()
+df = df[(df.cases>=0)&(df.pop>=100)]
+# 인코딩
+for col in ['region','age','race']:
+    df[col] = LabelEncoder().fit_transform(df[col])
+
+# 공간 가중치: Queen’s contiguity
+coords = df[['lon','lat']].drop_duplicates().values
+w = Queen.from_numpy_array(coords).full()[0]
+
+# 2. 계층적 베이지안 모델
+with pm.Model() as hier_model:
+    # 고정 효과 priors
+    β0 = pm.Normal('β0', mu=0, sigma=5)
+    β_age = pm.Normal('β_age', mu=0, sigma=1, shape=len(ages))
+    β_race = pm.Normal('β_race', mu=0, sigma=1, shape=len(races))
+    # 지역 random effect
+    σ_u = pm.HalfNormal('σ_u', sigma=1)
+    u = pm.Normal('u', mu=0, sigma=σ_u, shape=n_regions)
+    # 선형 예측자
+    η = (β0 +
+         β_age[df.age.values] +
+         β_race[df.race.values] +
+         u[df.region.values] +
+         np.log(df.pop.values/1e5))
+    μ = pm.math.exp(η)
+    # 관측 모델
+    y_obs = pm.Poisson('y_obs', mu=μ, observed=df.cases.values)
+    # 샘플링
+    trace_h = pm.sample(1000, tune=1000, target_accept=0.9, return_inferencedata=True)
+
+# 3. 공간적 CAR 모델
+with pm.Model() as car_model:
+    # 같은 fixed effects
+    β0 = pm.Normal('β0', mu=0, sigma=5)
+    β_age = pm.Normal('β_age', mu=0, sigma=1, shape=len(ages))
+    β_race = pm.Normal('β_race', mu=0, sigma=1, shape=len(races))
+    # CAR prior
+    τ = pm.Gamma('τ', alpha=2, beta=1)
+    rho = pm.Beta('rho', alpha=2, beta=2)
+    phi = pm.CAR('phi', W=w, tau=τ, rho=rho, shape=n_regions)
+    η = (β0 +
+         β_age[df.age.values] +
+         β_race[df.race.values] +
+         phi[df.region.values] +
+         np.log(df.pop.values/1e5))
+    μ = pm.math.exp(η)
+    y_obs = pm.Poisson('y_obs', mu=μ, observed=df.cases.values)
+    trace_c = pm.sample(1000, tune=1000, target_accept=0.9, return_inferencedata=True)
+
+# 4. 모델 비교 (WAIC, LOO)
+comp = az.compare({
+    'hier': trace_h,
+    'car': trace_c
+}, ic='waic', method='stack')
+print(comp)
+
+# 5. 수렴 진단
+print(az.summary(trace_h, var_names=['σ_u','β0','β_age','β_race']))
+print(az.summary(trace_c, var_names=['τ','rho','β0']))
+
+# 6. 시각화 예시
+az.plot_forest([trace_h, trace_c],
+               var_names=['β_age','β_race'], combined=True,
+               model_names=['Hier','CAR'])
+plt.show()
+
+# 지역별 random effect 지도 시각화
+import geopandas as gpd
+gdf = gpd.GeoDataFrame(
+    pd.DataFrame({'region':np.arange(n_regions),
+                  'u_mean':trace_h.posterior['u'].mean(['chain','draw']).values,
+                  'phi_mean':trace_c.posterior['phi'].mean(['chain','draw']).values}),
+    geometry=[gpd.points_from_xy([coords[i,0]],[coords[i,1]])[0]
+              for i in range(n_regions)],
+    crs="EPSG:4326"
+)
+gdf.plot(column='phi_mean', cmap='Reds', legend=True)
+plt.title("Spatial CAR: Regional Random Effect"); plt.show()
