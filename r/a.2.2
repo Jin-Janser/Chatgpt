@@ -1,0 +1,42 @@
+library(zoo)
+library(forecast)
+library(rugarch)
+library(xts)
+library(tseries)
+
+# 1. 데이터 준비
+dji <- read.zoo('DJI_weekly.csv', header=TRUE, index.column=1, format='%Y-%m-%d')
+dji <- na.approx(dji)                          # 보간
+r <- diff(log(dji$`Adj Close`))
+r <- r[!is.na(r)]
+# 이상치 제거
+Q <- quantile(r, c(0.25,0.75))
+IQR <- Q[2] - Q[1]
+r <- r[r >= Q[1]-1.5*IQR & r <= Q[2]+1.5*IQR]
+ts_r <- ts(coredata(r), frequency=52, start=c(2000,1))
+
+# 2. STL 분해
+stl_res <- stl(ts_r, s.window='periodic', robust=TRUE)
+plot(stl_res)
+
+# 3. ARIMA 모델 선택 및 예측
+Acf(ts_r); Pacf(ts_r)
+fit_arima <- auto.arima(ts_r, seasonal=FALSE, ic='bic')
+summary(fit_arima)
+fc <- forecast(fit_arima, h=8, level=95)
+plot(fc)
+
+# 4. ARCH-LM 검정 및 GARCH(1,1)
+print(Box.test(fit_arima$residuals^2, lag=12, type='Ljung-Box'))
+spec <- ugarchspec(
+  variance.model=list(model='sGARCH', garchOrder=c(1,1)),
+  mean.model=list(armaOrder=c(0,0)), distribution.model='std'
+)
+garch_fit <- ugarchfit(spec, data=ts_r, solver='hybrid')
+show(garch_fit)
+pars <- coef(garch_fit)
+cat('Persistence (alpha+beta)=', pars['alpha1'] + pars['beta1'], '\n')
+
+# 5. GARCH 조건부 변동성 시각화
+vol <- sigma(garch_fit)
+plot(vol, type='l', main='GARCH(1,1) Conditional Volatility', ylab='Volatility')
