@@ -1,0 +1,106 @@
+# 필요한 패키지 로드
+library(tidyverse)
+library(fitdistrplus)
+library(ggplot2)
+
+# 1) 데이터 로딩 (CSV 파일 예시)
+df <- read.csv("your_path.csv", stringsAsFactors = FALSE)
+
+# 2) 변수 선택 및 결측치·이상치 처리
+df <- df %>% select(State, Date, Unemployment_Rate) %>%
+  mutate(Date = as.Date(Date)) %>%
+  drop_na(Unemployment_Rate)
+
+# IQR 방법으로 이상치 제거
+Q1 <- quantile(df$Unemployment_Rate, 0.25)
+Q3 <- quantile(df$Unemployment_Rate, 0.75)
+IQR <- Q3 - Q1
+df <- df %>%
+  filter(Unemployment_Rate >= (Q1 - 1.5*IQR),
+         Unemployment_Rate <= (Q3 + 1.5*IQR))
+
+cat("전처리 후 관측치 수:", nrow(df), "\n")
+# 전체 실업률 벡터
+x <- df$Unemployment_Rate
+
+# 히스토그램 + Q–Q 플롯
+ggplot(df, aes(x = Unemployment_Rate)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "skyblue") +
+  stat_function(fun = dnorm,
+                args = list(mean = mean(x), sd = sd(x)),
+                color = "red", size = 1) +
+  labs(title = "실업률 히스토그램 및 정규밀도", x = "실업률 (%)", y = "밀도")
+
+qqnorm(x); qqline(x, col = "red"); title("정규 Q–Q 플롯")
+
+# 분포별 적합
+fit_norm  <- fitdist(x, "norm")
+# 지수분포(shift)
+fit_exp   <- fitdist(x - min(x) + 0.001, "exp")
+# t-분포
+fit_t     <- fitdist(x, "t", start = list(df = 5))
+
+# AIC/BIC 비교
+aic_bic <- data.frame(
+  dist = c("normal","exponential","t"),
+  AIC  = c(fit_norm$aic, fit_exp$aic, fit_t$aic),
+  BIC  = c(fit_norm$bic, fit_exp$bic, fit_t$bic)
+)
+print(aic_bic)
+
+# KS 검정
+ks_norm <- ks.test(x, "pnorm", fit_norm$estimate["mean"], fit_norm$estimate["sd"])
+ks_exp  <- ks.test(x - min(x) + 0.001, "pexp", fit_exp$estimate["rate"])
+ks_t    <- ks.test(x, "pt",
+                   df = fit_t$estimate["df"],
+                   ncp = 0)  # 위치·척도 별도 조정 시 pnorm 대신 커스터마이징 필요
+
+# Shapiro-Wilk 정규성 검정
+sw <- shapiro.test(sample(x, 5000))
+
+# 최적 분포 결론
+cat("KS p-values:", ks_norm$p.value, ks_exp$p.value, ks_t$p.value, "\n")
+cat("Shapiro-Wilk p-value:", sw$p.value, "\n")
+print(fit_t)  # t-분포 모수 확인
+# 캘리포니아 데이터 추출 (State == "California")
+ca <- df %>% filter(State == "California") %>% pull(Unemployment_Rate)
+m <- mean(ca); s <- sd(ca); n <- length(ca)
+
+results <- tibble(Level = c(0.90, 0.95, 0.99)) %>%
+  rowwise() %>%
+  mutate(
+    alpha = 1 - Level,
+    tcrit = qt(1 - alpha/2, df = n - 1),
+    CI_lower = m - tcrit * (s / sqrt(n)),
+    CI_upper = m + tcrit * (s / sqrt(n)),
+    PI_lower = m - tcrit * s * sqrt(1 + 1/n),
+    PI_upper = m + tcrit * s * sqrt(1 + 1/n)
+  ) %>%
+  select(Level, CI_lower, CI_upper, PI_lower, PI_upper)
+
+print(results)
+# 최적 분포: t-분포 모수에서 위치(loc), 척도(scale), 자유도(df) 추출
+params <- fit_t$estimate
+df_t   <- params["df"]
+loc    <- params["m"]    # fitdistrplus 패키지 기준 이름 확인
+scale  <- params["s"]
+
+# 확률 계산
+p_above_10 <- 1 - pt((10 - loc) / scale, df = df_t)
+p_below_5  <- pt((5  - loc) / scale, df = df_t)
+
+cat(sprintf("P(Unemp > 10%%) = %.4f\n", p_above_10))
+cat(sprintf("P(Unemp <  5%%) = %.4f\n", p_below_5))
+
+# 확률밀도 곡선 시각화
+xseq <- seq(min(x), max(x), length.out = 500)
+pdf_t <- dt((xseq - loc)/scale, df = df_t) / scale
+
+ggplot() +
+  geom_line(aes(x = xseq, y = pdf_t), color = "blue") +
+  geom_ribbon(aes(x = xseq[xseq >= 10], y = pdf_t[xseq >= 10]),
+              fill = "red", alpha = 0.3) +
+  geom_ribbon(aes(x = xseq[xseq <= 5], y = pdf_t[xseq <= 5]),
+              fill = "green", alpha = 0.3) +
+  labs(title = "극단값 확률 (t-분포 기반)",
+       x = "실업률 (%)", y = "확률밀도")
