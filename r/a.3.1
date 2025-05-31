@@ -1,0 +1,128 @@
+# Iris Dataset: PCA & Cluster Analysis (R)
+
+# 1. 라이브러리 로드
+# install.packages(c("tidyverse","factoextra","cluster","fpc"))
+library(tidyverse)     # 데이터 전처리·시각화
+library(factoextra)    # PCA·클러스터 시각화
+library(cluster)       # silhouette
+library(fpc)           # Dunn index
+
+# 2. 데이터 로드 및 이상치 처리
+data(iris)
+df <- iris
+
+# 연속형 변수 추출
+X <- df %>% select(Sepal.Length, Sepal.Width, Petal.Length, Petal.Width)
+
+# IQR 방법으로 이상치 제거
+Q1 <- apply(X, 2, quantile, .25)
+Q3 <- apply(X, 2, quantile, .75)
+IQRs <- Q3 - Q1
+mask <- apply(X, 1, function(row) {
+  all(row >= Q1 - 1.5*IQRs & row <= Q3 + 1.5*IQRs)
+})
+X_clean <- X[mask, ]
+species_clean <- df$Species[mask]
+
+# 3. 표준화 (Z-score)
+X_scaled <- scale(X_clean)
+
+# 4. PCA 수행
+pca_res <- prcomp(X_scaled, center=FALSE, scale.=FALSE)
+eigvals <- pca_res$sdev^2
+explained <- eigvals / sum(eigvals)
+
+# 4.1 스크리 플롯
+fviz_eig(pca_res, addlabels=TRUE, ylim=c(0,50)) +
+  ggtitle("Scree Plot") +
+  theme_minimal()
+
+# 4.2 변수 기여도 (PC1·PC2 로딩)
+loadings <- pca_res$rotation[,1:2]
+print(round(loadings, 3))
+
+# 4.3 PCA 바이플롯
+fviz_pca_biplot(pca_res,
+                geom.ind="point", pointshape=21, 
+                fill=species_clean, palette="jco",
+                addEllipses=TRUE, label="var",
+                repel=TRUE) +
+  labs(title="PCA Biplot",
+       x=paste0("PC1 (", round(explained[1]*100,1), "%)"),
+       y=paste0("PC2 (", round(explained[2]*100,1), "%)"))
+
+# 5. 군집 분석
+# 5.1 K-means (k=3)
+set.seed(123)
+km <- kmeans(X_scaled, centers=3, nstart=25)
+labels_k <- km$cluster
+
+# 5.2 계층적 군집 (Ward)
+hc <- hclust(dist(X_scaled), method="ward.D2")
+labels_h <- cutree(hc, k=3)
+
+# 6. 군집 품질 평가
+sil_k <- silhouette(labels_k, dist(X_scaled))
+sil_h <- silhouette(labels_h, dist(X_scaled))
+avg_sil_k <- mean(sil_k[, 'sil_width'])
+avg_sil_h <- mean(sil_h[, 'sil_width'])
+
+# Dunn index 계산
+dunn_k <- dunn(dist(X_scaled), labels_k)
+dunn_h <- dunn(dist(X_scaled), labels_h)
+
+# 결과표
+cluster_eval <- tibble(
+  Method = c("K-means","Hierarchical"),
+  Silhouette = c(avg_sil_k, avg_sil_h),
+  Dunn_Index  = c(dunn_k, dunn_h)
+)
+print(cluster_eval)
+
+# 7. PCA 공간에 클러스터 오버레이
+pca_df <- as_tibble(pca_res$x[,1:2], .name_repair="minimal")
+pca_df <- pca_df %>% 
+  mutate(Species = species_clean,
+         KMeans    = factor(labels_k),
+         Hierarchy = factor(labels_h))
+
+# 7.1 K-means 클러스터
+ggplot(pca_df, aes(PC1, PC2, color=KMeans)) +
+  geom_point(size=3, alpha=0.8) +
+  labs(title="PCA with K-means Clusters",
+       x=paste0("PC1 (", round(explained[1]*100,1), "%)"),
+       y=paste0("PC2 (", round(explained[2]*100,1), "%)"),
+       color="Cluster") +
+  theme_minimal()
+
+# 7.2 계층적 클러스터
+ggplot(pca_df, aes(PC1, PC2, color=Hierarchy)) +
+  geom_point(size=3, alpha=0.8) +
+  labs(title="PCA with Hierarchical Clusters",
+       x=paste0("PC1 (", round(explained[1]*100,1), "%)"),
+       y=paste0("PC2 (", round(explained[2]*100,1), "%)"),
+       color="Cluster") +
+  theme_minimal()
+
+# 8. 실루엣 플롯 (예: K-means)
+fviz_silhouette(sil_k) +
+  labs(title="Silhouette Plot (K-means)")
+
+# 9. 변수 분포 히스토그램 (스케일링 전·후)
+# 9.1 원본
+X_clean %>% 
+  gather(variable, value) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins=20, fill="steelblue", color="white") +
+  facet_wrap(~variable, scales="free") +
+  labs(title="Original Feature Distributions") +
+  theme_minimal()
+
+# 9.2 스케일링 후
+as_tibble(X_scaled, .name_repair="minimal") %>%
+  gather(variable, value) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins=20, fill="darkgreen", color="white") +
+  facet_wrap(~variable, scales="free") +
+  labs(title="Scaled Feature Distributions") +
+  theme_minimal()
