@@ -1,0 +1,144 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.datasets import load_iris
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, silhouette_samples
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import pdist, squareform
+
+# 1. 데이터 로딩 및 이상치 처리
+iris = load_iris()
+X = pd.DataFrame(iris.data, columns=iris.feature_names)
+y = pd.Categorical.from_codes(iris.target, iris.target_names)
+
+# IQR 방법으로 이상치 제거
+Q1 = X.quantile(0.25)
+Q3 = X.quantile(0.75)
+IQR = Q3 - Q1
+mask = ~((X < (Q1 - 1.5 * IQR)) | (X > (Q3 + 1.5 * IQR))).any(axis=1)
+X_clean = X[mask].reset_index(drop=True)
+y_clean = y[mask].reset_index(drop=True)
+
+# 2. 표준화 (Z-score)
+scaler = StandardScaler()
+X_scaled = pd.DataFrame(scaler.fit_transform(X_clean), columns=X_clean.columns)
+
+# 3. PCA 수행
+pca = PCA()
+pca.fit(X_scaled)
+pcs = pca.transform(X_scaled)
+eigvals = pca.explained_variance_
+explained = pca.explained_variance_ratio_
+
+# 스크리 플롯
+plt.figure(figsize=(6,4))
+plt.plot(range(1, len(eigvals)+1), eigvals, 'o-', color='navy')
+plt.title('Scree Plot')
+plt.xlabel('Principal Component')
+plt.ylabel('Eigenvalue')
+plt.xticks(range(1,5))
+plt.grid(True)
+plt.show()
+
+# 변수 기여도 (PC1·PC2 로딩)
+loadings = pd.DataFrame(pca.components_.T[:, :2], 
+                        index=X_scaled.columns, 
+                        columns=['PC1','PC2'])
+print("Variable Loadings:\n", loadings)
+
+# 1·2주성분 점수 데이터프레임
+pc_df = pd.DataFrame(pcs[:, :2], columns=['PC1','PC2'])
+pc_df['Species'] = y_clean.values
+
+# PCA 바이플롯
+plt.figure(figsize=(6,6))
+sns.scatterplot(data=pc_df, x='PC1', y='PC2', hue='Species', s=60)
+for var in X_scaled.columns:
+    plt.arrow(0, 0, 
+              loadings.loc[var,'PC1']*2, 
+              loadings.loc[var,'PC2']*2, 
+              color='gray', alpha=0.7)
+    plt.text(loadings.loc[var,'PC1']*2.2, 
+             loadings.loc[var,'PC2']*2.2, var, color='black')
+plt.xlabel(f"PC1 ({explained[0]*100:.1f}% var)")
+plt.ylabel(f"PC2 ({explained[1]*100:.1f}% var)")
+plt.title('PCA Biplot')
+plt.grid(True)
+plt.legend()
+plt.show()
+
+# 4. 군집 분석
+# 4.1 K-means (k=3)
+kmeans = KMeans(n_clusters=3, random_state=42).fit(X_scaled)
+labels_k = kmeans.labels_
+
+# 4.2 계층적 군집 (Ward linkage)
+Z = linkage(X_scaled, method='ward', metric='euclidean')
+labels_h = fcluster(Z, t=3, criterion='maxclust') - 1
+
+# 5. 군집 품질 평가
+sil_k = silhouette_score(X_scaled, labels_k)
+sil_h = silhouette_score(X_scaled, labels_h)
+
+# Dunn index 함수 정의
+dist_matrix = squareform(pdist(X_scaled, metric='euclidean'))
+def dunn_index(labels):
+    clusters = np.unique(labels)
+    intra = [dist_matrix[np.ix_(np.where(labels==c)[0], 
+                                 np.where(labels==c)[0])].max()
+             for c in clusters if np.sum(labels==c)>1]
+    inter = []
+    for i, c1 in enumerate(clusters):
+        for c2 in clusters[i+1:]:
+            pts1 = np.where(labels==c1)[0]
+            pts2 = np.where(labels==c2)[0]
+            inter.append(dist_matrix[np.ix_(pts1, pts2)].min())
+    return np.min(inter) / np.max(intra)
+
+dunn_k = dunn_index(labels_k)
+dunn_h = dunn_index(labels_h)
+
+# 결과표 출력
+result_df = pd.DataFrame({
+    'Method': ['K-means','Hierarchical'],
+    'Silhouette': [sil_k, sil_h],
+    'Dunn Index': [dunn_k, dunn_h]
+})
+print("\nCluster Quality Comparison:\n", result_df)
+
+# 6. PCA 공간에 군집 오버레이
+pc_df['KMeans'] = labels_k
+pc_df['Hierarchical'] = labels_h
+
+fig, axes = plt.subplots(1, 2, figsize=(12,5))
+sns.scatterplot(ax=axes[0], data=pc_df, x='PC1', y='PC2', 
+                hue='KMeans', palette='Set1', s=60)
+axes[0].set_title('PCA with K-means Clusters')
+sns.scatterplot(ax=axes[1], data=pc_df, x='PC1', y='PC2', 
+                hue='Hierarchical', palette='Set2', s=60)
+axes[1].set_title('PCA with Hierarchical Clusters')
+for ax in axes:
+    ax.set_xlabel('PC1'); ax.set_ylabel('PC2'); ax.legend(title='Cluster')
+plt.tight_layout()
+plt.show()
+
+# 7. 실루엣 플롯 예시 (K-means)
+sample_sil = silhouette_samples(X_scaled, labels_k)
+y_lower = 10
+plt.figure(figsize=(6,4))
+for i in range(3):
+    ith_sil = sample_sil[labels_k == i]
+    ith_sil.sort()
+    y_upper = y_lower + len(ith_sil)
+    plt.fill_betweenx(np.arange(y_lower, y_upper),
+                      0, ith_sil, alpha=0.7)
+    plt.text(-0.02, y_lower + len(ith_sil)/2, str(i))
+    y_lower = y_upper + 10
+plt.title('Silhouette Plot (K-means)')
+plt.xlabel('Silhouette Coefficient'); plt.ylabel('Cluster')
+plt.axvline(sil_k, color="red", linestyle="--")
+plt.show()
