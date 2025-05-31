@@ -1,0 +1,62 @@
+/* 1. 데이터 준비 */
+proc import datafile='DJI_weekly.csv'
+  out=dji dbms=csv replace; getnames=yes;
+run;
+
+data dji2;
+  set dji;
+  format date yymmdd10.;
+  date = input(Date, yymmdd10.);
+run;
+proc sort data=dji2; by date; run;
+
+/* 선형 보간 */
+proc expand data=dji2 out=dji3;
+  id date;
+  convert AdjClose = AdjClose_I / method=join;
+run;
+
+/* 로그수익률 및 이상치 제거 */
+data r;
+  set dji3;
+  logr = log(AdjClose_I/lag(AdjClose_I));
+  if _N_>1;
+run;
+
+proc univariate data=r noprint;
+  var logr;
+  output out=qt pctlpts=25 75 pctlpre=P_;
+run;
+
+data r2;
+  if _N_=1 then set qt;
+  set r;
+  iqr = P75 - P25;
+  if logr < P25-1.5*iqr or logr > P75+1.5*iqr then delete;
+run;
+
+/* 2. STL 분해 (SAS ETS) */
+proc timeseries data=r2 outdecomp=dec;
+  id date interval=week accumulate=none;
+  var logr;
+  decomp / mode=add seasonality=52;
+run;
+
+/* 3. ARIMA 모델 선택 및 예측 */
+proc arima data=r2;
+  identify var=logr(1) nlag=52;
+  estimate p=0:5 q=0:5 method=ml;
+  forecast lead=8 alpha=0.05 out=fc outall;
+run;
+
+/* 4. ARCH-LM 검정 및 GARCH(1,1) */
+proc autoreg data=r2;
+  model logr = / garch=(q=1,p=1) noint dist=t;
+  output out=gout ht=condvol;
+run;
+
+/* 5. 시각화 */
+proc sgplot data=gout;
+  series x=date y=condvol / lineattrs=(color=red);
+  title 'GARCH(1,1) Conditional Volatility';
+run;
