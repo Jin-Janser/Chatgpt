@@ -1,0 +1,81 @@
+/* 1.1 데이터 불러오기 */
+proc import datafile="train.csv" out=titanic dbms=csv replace;
+    getnames=yes;
+run;
+
+/* 1.2 결측치 처리 */
+data titanic2;
+  set titanic;
+  /* Age 결측 → 중앙값(=28)으로 대체 */
+  if Age=. then Age=28;
+  /* Embarked 결측 → 최빈값('S')로 대체 */
+  if Embarked='' then Embarked='S';
+  /* 중도절단 변수 및 시간 변수 생성 */
+  time     = Age;           /* 예시로 Age를 생존시간으로 사용 */
+  censor   = (Survived=0);  /* Survived=0이면 검열(censor=1) */
+  /* 범주형 인코딩 */
+  Pclass_c=put(Pclass,1.);
+  Sex_c   =Sex;
+  format Pclass_c Sex_c $8.;
+run;
+
+ods graphics on;
+
+/* 2.1 성별별 KM 곡선 및 로그-순위 검정 */
+proc lifetest data=titanic2 plots=survival(atrisk cl);
+  time time*censor(1);
+  strata Sex_c;
+  ods output SurvivalPlot=KM_Sex;
+run;
+
+/* 2.2 Pclass별 KM 곡선 및 로그-순위 검정 */
+proc lifetest data=titanic2 plots=survival(atrisk cl);
+  time time*censor(1);
+  strata Pclass_c;
+  ods output SurvivalPlot=KM_Pclass;
+run;
+
+/* 3.1 Cox PH 모델 적합 */
+proc phreg data=titanic2 plots=none;
+  class Pclass_c Sex_c / param=ref ref=first;
+  model time*censor(1) = Pclass_c Sex_c Age SibSp Parch Fare
+        / rl ties=efron;
+  hazardratio 'HR Table' Pclass_c Sex_c / cl=both;
+  ods output ParameterEstimates=PE HR=HR_Table;
+run;
+
+/* 3.2 비례위험 가정 검증 (Schoenfeld 잔차) */
+proc phreg data=titanic2;
+  class Pclass_c Sex_c / param=ref ref=first;
+  model time*censor(1) = Pclass_c Sex_c Age SibSp Parch Fare
+        / ties=efron;
+  assess ph / resample;
+  ods output Assess=PH_Assess;
+run;
+
+/* 4.1 프로필 데이터셋: 30세 여성, 1등석, SibSp=0, Parch=0, Fare 중앙값 */
+proc sql;
+  select median(Fare) into :medFare from titanic2 where Pclass_c='1';
+quit;
+
+data profile;
+  length Pclass_c $8 Sex_c $6;
+  time=.; censor=.;
+  Pclass_c='1'; Sex_c='female';
+  Age=30; SibSp=0; Parch=0; Fare=&medFare;
+run;
+
+/* 4.2 예측 생존함수 계산 */
+proc phreg data=titanic2 outest=est phregout=survOut;
+  class Pclass_c Sex_c / param=ref ref=first;
+  model time*censor(1)=Pclass_c Sex_c Age SibSp Parch Fare;
+  baseline out=PredSurv covariates=profile survival=SurvProb / method=pl;
+run;
+
+/* 4.3 생존곡선 시각화 */
+proc sgplot data=PredSurv;
+  series x=time y=SurvProb / markers lineattrs=(thickness=2 color=blue);
+  xaxis label="Time (Age)" grid;
+  yaxis label="Predicted Survival Probability" grid;
+  title "Predicted Survival: 30yo Female, 1st Class";
+run;
