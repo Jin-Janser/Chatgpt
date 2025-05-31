@@ -1,0 +1,102 @@
+# 라이브러리 설치(필요 시 주석 해제)
+# install.packages(c("survival","survminer","dplyr","ggplot2"))
+
+library(survival)    # 생존분석
+library(survminer)   # 시각화
+library(dplyr)       # 데이터 처리
+library(ggplot2)     # 추가 시각화
+
+# 데이터 로딩
+titanic <- read.csv("train.csv", stringsAsFactors=FALSE)  # 경로 조정
+
+# 결측치 처리
+titanic$Age[is.na(titanic$Age)] <- median(titanic$Age, na.rm=TRUE)
+titanic$Embarked[titanic$Embarked==""] <-
+  names(sort(table(titanic$Embarked), decreasing=TRUE))[1]
+
+# 범주형 인코딩
+titanic <- titanic %>%
+  mutate(
+    Sex   = factor(Sex),
+    Pclass= factor(Pclass),
+    Embarked = factor(Embarked),
+    Survived = as.numeric(Survived)  # 0/1
+  )
+
+# 중도절단·관측 변수 지정
+titanic$time <- titanic$Age    # 예시로 Age를 ‘시간’으로 사용
+titanic$status <- titanic$Survived
+
+# 연속형 변수 분포 확인 (Fare 로그 변환 예시)
+hist(titanic$Fare, main="Fare 분포", xlab="Fare")
+titanic$logFare <- log1p(titanic$Fare)
+
+# 성별별 생존곡선
+km_sex <- survfit(Surv(time, status) ~ Sex, data=titanic)
+ggsurvplot(km_sex, data=titanic,
+           palette=c("#E7B800","#2E9FDF"),
+           legend.title="Sex",
+           legend.labs=c("Male","Female"),
+           xlab="Time (Age)", ylab="Survival Probability",
+           title="Survival by Sex")
+
+# 성별 로그-순위 검정
+lr_sex <- survdiff(Surv(time, status) ~ Sex, data=titanic)
+print(lr_sex)
+
+# Pclass별 생존곡선
+km_cls <- survfit(Surv(time, status) ~ Pclass, data=titanic)
+ggsurvplot(km_cls, data=titanic,
+           palette=c("#D55E00","#56B4E9","#009E73"),
+           legend.title="Pclass",
+           xlab="Time (Age)", ylab="Survival Probability",
+           title="Survival by Passenger Class")
+
+# Pclass 1 vs 3 로그-순위 검정
+lr_cls13 <- survdiff(Surv(time, status) ~ Pclass,
+                     data=filter(titanic, Pclass %in% c("1","3")))
+print(lr_cls13)
+
+Call:
+survdiff(formula = Surv(time, status) ~ Sex, data = titanic)
+
+          N Observed Expected (O-E)^2/E (O-E)^2/V
+Sex=Male  577      109    150.4      11.89      9.22
+Sex=Female314      233    191.6      8.95       9.22
+ Chisq= 9.2  on 1 degrees of freedom, p=0.0024
+
+# Cox 모델 적합
+cox_mod <- coxph(Surv(time, status) ~ Pclass + Sex + Age + SibSp + Parch + logFare,
+                 data=titanic)
+summary(cox_mod)
+
+# Hazard Ratio 표 형태
+hr_table <- data.frame(
+  Variable = rownames(summary(cox_mod)$coefficients),
+  HR       = exp(summary(cox_mod)$coefficients[,"coef"]),
+  CI_low   = exp(confint(cox_mod)[,1]),
+  CI_high  = exp(confint(cox_mod)[,2]),
+  p_value  = summary(cox_mod)$coefficients[,"Pr(>|z|)"]
+)
+print(hr_table)
+
+# 비례위험 가정 검증 (Schoenfeld 잔차)
+ph_test <- cox.zph(cox_mod)
+print(ph_test)
+plot(ph_test)  # 잔차 시각화
+
+# 30세 여성·1등석 승객 프로필
+new_prof <- data.frame(
+  Pclass="1", Sex="female", Age=30,
+  SibSp=0, Parch=0,
+  logFare = log1p(median(titanic$Fare[titanic$Pclass=="1"]))
+)
+
+# 생존 함수 예측
+sf_prof <- survfit(cox_mod, newdata=new_prof)
+ggsurvplot(sf_prof, 
+           conf.int=TRUE,
+           palette="darkgreen",
+           xlab="Time (Age)",
+           ylab="Survival Probability",
+           title="Predicted Survival: 30yo Female, 1st Class")
