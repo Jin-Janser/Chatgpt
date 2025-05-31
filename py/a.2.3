@@ -1,0 +1,78 @@
+# Bayesian linear regression of Wine Quality (PyMC3)
+
+import pandas as pd
+import numpy as np
+import arviz as az
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+import pymc3 as pm
+import warnings
+warnings.simplefilter("ignore", FutureWarning)
+
+# 1. 데이터 로드 및 전처리
+red = pd.read_csv('winequality-red.csv', sep=';')     # 경로 수정 필요
+white = pd.read_csv('winequality-white.csv', sep=';')
+df = pd.concat([red, white], ignore_index=True)
+
+# 결측치 확인
+assert df.isnull().sum().sum() == 0, "결측치가 존재합니다."
+
+# 이상치 제거 (IQR × 1.5)
+Q1 = df.quantile(0.25)
+Q3 = df.quantile(0.75)
+IQR = Q3 - Q1
+df = df[~((df < (Q1 - 1.5*IQR)) | (df > (Q3 + 1.5*IQR))).any(axis=1)]
+
+# 독립변수 표준화
+features = ['fixed acidity','volatile acidity','citric acid','residual sugar',
+            'chlorides','free sulfur dioxide','total sulfur dioxide',
+            'density','pH','sulphates','alcohol']
+scaler = StandardScaler()
+X = scaler.fit_transform(df[features])
+y = df['quality'].values
+
+# 2. 베이지안 선형회귀 모델 (약정보적 사전분포 Normal(0,1))
+with pm.Model() as bayes_model:
+    # priors
+    alpha = pm.Normal('alpha', mu=y.mean(), sigma=1)
+    betas = pm.Normal('betas', mu=0, sigma=1, shape=len(features))
+    sigma = pm.HalfNormal('sigma', sigma=1)
+    
+    # 선형 예측
+    mu = alpha + pm.math.dot(X, betas)
+    
+    # likelihood
+    y_obs = pm.Normal('y_obs', mu=mu, sigma=sigma, observed=y)
+    
+    # sampling
+    trace = pm.sample(2000, tune=2000, target_accept=0.95, return_inferencedata=True)
+
+# 3. 사후 분포 요약
+summary = az.summary(trace, var_names=['alpha','betas','sigma'],
+                     round_to=3)
+print(summary)
+
+# 4. 95% 크레디블 구간 시각화
+az.plot_forest(trace, var_names=['betas'], combined=True,
+               credible_interval=0.95,
+               ridgeplot_overlap=0.2)
+plt.yticks(range(len(features)), features)
+plt.title('Posterior 95% Credible Intervals for Coefficients')
+plt.xlabel('Coefficient value')
+plt.tight_layout()
+plt.show()
+
+# 5. MCMC 수렴 진단
+az.plot_trace(trace, var_names=['alpha','betas'], compact=True)
+plt.tight_layout()
+plt.show()
+
+# 6. 사후 예측 분포 확인
+with bayes_model:
+    ppc = pm.sample_posterior_predictive(trace, var_names=['y_obs'], random_seed=42)
+
+az.plot_ppc(az.from_pymc3(posterior_predictive=ppc, model=bayes_model),
+            group="posterior_predictive", data_pairs={"y_obs":"y_obs"})
+plt.title('Posterior Predictive Check')
+plt.show()
