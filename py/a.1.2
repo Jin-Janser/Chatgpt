@@ -1,50 +1,89 @@
 import pandas as pd
 import numpy as np
-from scipy import stats
+import scipy.stats as stats
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# 데이터 생성 (실제 환경에서는 파일에서 로딩)
-np.random.seed(0)
-data = {
-    'gender': np.random.choice(['male', 'female'], 1000),
-    'math score': np.random.normal(65, 15, 1000).clip(0, 100),
-    'reading score': np.random.normal(70, 12, 1000).clip(0, 100),
-    'writing score': np.random.normal(68, 14, 1000).clip(0, 100)
-}
-df = pd.DataFrame(data)
+# 1. 데이터 로딩 및 전처리
+df = pd.read_csv('your_path.csv', parse_dates=['Date'])
+df = df[['State','Date','Unemployment_Rate']].dropna()
+Q1, Q3 = df['Unemployment_Rate'].quantile([0.25,0.75])
+IQR = Q3 - Q1
+df = df[(df['Unemployment_Rate'] >= Q1-1.5*IQR) & (df['Unemployment_Rate'] <= Q3+1.5*IQR)]
 
-# 기술통계량 계산
-stats_summary = df[['math score', 'reading score', 'writing score']].describe(
-    percentiles=[.25, .5, .75]
-).T
+# 전체 데이터
+data = df['Unemployment_Rate'].values
 
-# 성별별 평균, 표준편차 계산
-grouped_stats = df.groupby('gender')[
-    ['math score', 'reading score', 'writing score']
-].agg(['mean', 'std'])
+# 2. 분포 적합도 검정
+# 히스토그램 + KDE
+plt.figure(figsize=(10,5))
+sns.histplot(data, bins=50, kde=True, color='skyblue')
+plt.title('Unemployment Rate Histogram & KDE')
+plt.xlabel('Unemployment Rate (%)')
+plt.show()
 
-# 성별별 t-검정 수행
-male_scores = df[df['gender'] == 'male']
-female_scores = df[df['gender'] == 'female']
-test_results = {}
+# Q-Q 플롯 (정규분포 기준)
+plt.figure(figsize=(6,6))
+stats.probplot(data, dist='norm', plot=plt)
+plt.title('Normal Q-Q Plot')
+plt.show()
 
-for subject in ['math score', 'reading score', 'writing score']:
-    t_stat, p_val = stats.ttest_ind(
-        male_scores[subject], 
-        female_scores[subject], 
-        equal_var=False  # Welch's t-test 사용
-    )
-    test_results[subject] = {
-        't_statistic': t_stat, 
-        'p_value': p_val
-    }
+# 분포별 AIC/BIC 계산
+def calc_aic_bic(loglik, k, n):
+    return 2*k - 2*loglik, np.log(n)*k - 2*loglik
 
-# 결과 출력
-print("=== 기술통계량 요약 ===")
-print(stats_summary)
-print("\n=== 성별별 통계량 ===")
-print(grouped_stats)
-print("\n=== t-검정 결과 ===")
-for subject, result in test_results.items():
-    print(f"{subject}: t={result['t_statistic']:.3f}, p={result['p_value']:.3f}")
+n = len(data)
+# 정규
+mu, sigma = stats.norm.fit(data)
+ll_norm = stats.norm.logpdf(data, mu, sigma).sum()
+aic_norm, bic_norm = calc_aic_bic(ll_norm, k=2, n=n)
+# 지수 (data shifted)
+shifted = data - data.min() + 1e-3
+loc_e, scale_e = stats.expon.fit(shifted)
+ll_exp = stats.expon.logpdf(shifted, loc_e, scale_e).sum()
+aic_exp, bic_exp = calc_aic_bic(ll_exp, k=1, n=n)
+# t-분포
+df_t, loc_t, scale_t = stats.t.fit(data)
+ll_t = stats.t.logpdf(data, df_t, loc_t, scale_t).sum()
+aic_t, bic_t = calc_aic_bic(ll_t, k=3, n=n)
+
+# KS & Shapiro-Wilk
+ks_norm = stats.kstest(data, 'norm', args=(mu, sigma))
+ks_exp = stats.kstest(shifted, 'expon', args=(loc_e, scale_e))
+ks_t   = stats.kstest(data, 't', args=(df_t, loc_t, scale_t))
+sw_stat, sw_p = stats.shapiro(data[:5000])
+
+print("AIC/BIC (norm, exp, t):")
+print((aic_norm,bic_norm),(aic_exp,bic_exp),(aic_t,bic_t))
+print("KS p-values:", ks_norm.pvalue, ks_exp.pvalue, ks_t.pvalue)
+print("SW p-value:", sw_p)
+print(f"Best fit: t-dist df={df_t:.2f}, loc={loc_t:.2f}, scale={scale_t:.2f}")
+
+# 3. 예측 구간 계산 (캘리포니아 예시)
+ca = df[df['State']=='California']['Unemployment_Rate']
+m, s = ca.mean(), ca.std(ddof=1)
+n_ca = len(ca)
+for level in [0.90,0.95,0.99]:
+    alpha = 1-level
+    tcrit = stats.t.ppf(1-alpha/2, df=n_ca-1)
+    # CI
+    ci = (m - tcrit*(s/np.sqrt(n_ca)), m + tcrit*(s/np.sqrt(n_ca)))
+    # PI
+    pi = (m - tcrit*s*np.sqrt(1+1/n_ca), m + tcrit*s*np.sqrt(1+1/n_ca))
+    print(f"{level*100:.0f}% CI: {ci}, PI: {pi}")
+
+# 4. 극단값 확률 계산
+# P(X>10%), P(X<5%)
+p_above_10 = 1 - stats.t.cdf((10-loc_t)/scale_t, df=df_t)
+p_below_5  = stats.t.cdf((5-loc_t)/scale_t, df=df_t)
+print(f"P>10%: {p_above_10:.4f}, P<5%: {p_below_5:.4f}")
+
+# 확률밀도 곡선 시각화
+x = np.linspace(data.min(), data.max(), 500)
+pdf = stats.t.pdf((x-loc_t)/scale_t, df=df_t)/scale_t
+plt.figure(figsize=(8,4))
+plt.plot(x,pdf,label='t-PDF')
+plt.fill_between(x,0,pdf,where=x>=10,color='red',alpha=0.3,label=f'>10% ({p_above_10:.2%})')
+plt.fill_between(x,0,pdf,where=x<=5,color='green',alpha=0.3,label=f'<5% ({p_below_5:.2%})')
+plt.legend(); plt.xlabel('Unemployment Rate (%)'); plt.title('Extreme Value Probabilities')
+plt.show()
