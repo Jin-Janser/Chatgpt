@@ -1,0 +1,162 @@
+/* 가상 데이터 생성 및 전처리 */
+libname mylib "/your/path";  /* 사용자 환경에 맞게 수정 */
+
+data mylib.income;
+  call streaminit(123);
+  do id = 1 to 5000;
+    gender     = ifn(rand("uniform")<0.52, "Male", "Female");
+    /* 교육 수준 생성 */
+    u = rand("uniform");
+    if u<0.4  then education="High School";
+    else if u<0.75 then education="Bachelor";
+    else if u<0.95 then education="Master";
+    else education="PhD";
+    experience = max(0, min(40, rand("normal",10,5)));
+    /* 교육별, 성별 다중 계수 적용 */
+    edu_mult    = (education="High School")*1 
+                + (education="Bachelor")*1.4 
+                + (education="Master")*1.8 
+                + (education="PhD")*2.3;
+    gender_mult = (gender="Male")*1 + (gender="Female")*0.82;
+    /* 소득 생성 */
+    income = 30000 * edu_mult * gender_mult 
+           * (1 + 0.02*experience) * exp(rand("normal",0,0.4));
+    /* 2% 확률로 결측 부여 */
+    if rand("uniform")<0.02 then income=.;
+    output;
+  end;
+  keep id gender education experience income;
+run;
+
+/* 결측치 제거 및 파생변수 생성 */
+data mylib.income;
+  set mylib.income;
+  where income>.;
+  log_income = log(income);
+  edu_years  = put(education, $20.);
+  select(education);
+    when("High School") edu_years=12;
+    when("Bachelor")    edu_years=16;
+    when("Master")       edu_years=18;
+    when("PhD")          edu_years=22;
+  end;
+  male = (gender="Male");
+run;
+
+ods graphics on;
+
+/* 전체 로그소득 KDE */
+proc kde data=mylib.income out=kde_all;
+  univar log_income / plots=densitybandwidth;
+  title "전체 로그소득 커널 밀도 및 대역폭";
+run;
+
+/* 성별별 KDE */
+proc sort data=mylib.income; by gender; run;
+proc kde data=mylib.income out=kde_gender;
+  by gender;
+  univar log_income / plots=densityoverlay bandwidth;
+  title "성별 로그소득 커널 밀도 비교";
+run;
+
+/* 교육 수준별 KDE */
+proc sort data=mylib.income; by education; run;
+proc kde data=mylib.income out=kde_edu;
+  by education;
+  univar log_income / plots=densityoverlay bandwidth;
+  title "교육 수준별 로그소득 커널 밀도 비교";
+run;
+
+ods graphics off;
+
+proc iml;
+  use mylib.income; read all var {income} into x; close;
+  start Gini(x);
+    x = sort(x);
+    n = nrow(x);
+    return((2*sum(T(1:n)#x))/(n*sum(x)) - (n+1)/n);
+  finish;
+  start Atkinson(x, eps);
+    x = x[x>0];
+    m = mean(x);
+    if eps=1 then return(1 - exp(mean(log(x)))/m);
+    return(1 - (mean(x##(1-eps))**(1/(1-eps)))/m);
+  finish;
+  call randseed(123);
+  bootG = j(1000,1,0); bootA = bootG;
+  do i=1 to 1000;
+    samp = x[ ceil( nrow(x)*randfun(nrow(x),"Uniform") ) ];
+    bootG[i] = Gini(samp);
+    bootA[i] = Atkinson(samp,0.5);
+  end;
+  g0 = Gini(x); a0 = Atkinson(x,0.5);
+  ciG = percentile(bootG, {2.5 97.5});
+  ciA = percentile(bootA, {2.5 97.5});
+  print g0 ciG a0 ciA;
+quit;
+
+/* OLS 회귀 */
+proc reg data=mylib.income outest=est_ols;
+  model log_income = edu_years experience male;
+  title "OLS 회귀 분석 결과";
+run;
+
+/* 분위 회귀 (10%,50%,90%) */
+proc quantreg data=mylib.income ci=sparsity outest=est_qr;
+  model log_income = edu_years experience male / quantile=(0.1 0.5 0.9);
+  title "Quantile Regression (τ=0.1,0.5,0.9)";
+run;
+
+/* 결과 통합 */
+data summary;
+  set est_ols(in=A rename=(edu_years=OLS_edu SE_edu=OLS_edu_se Probt_edu=OLS_edu_p
+            experience=OLS_exp SE_exp=OLS_exp_se Probt_exp=OLS_exp_p
+            male=OLS_male SE_male=OLS_male_se Probt_male=OLS_male_p))
+      est_qr(in=B where=(Quantile=0.10) rename=(edu_years=Q10_edu SE_edu=Q10_edu_se Probt_edu=Q10_edu_p
+            experience=Q10_exp SE_exp=Q10_exp_se Probt_exp=Q10_exp_p
+            male=Q10_male SE_male=Q10_male_se Probt_male=Q10_male_p))
+      est_qr(in=C where=(Quantile=0.50) rename=(edu_years=Q50_edu SE_edu=Q50_edu_se Probt_edu=Q50_edu_p
+            experience=Q50_exp SE_exp=Q50_exp_se Probt_exp=Q50_exp_p
+            male=Q50_male SE_male=Q50_male_se Probt_male=Q50_male_p))
+      est_qr(in=D where=(Quantile=0.90) rename=(edu_years=Q90_edu SE_edu=Q90_edu_se Probt_edu=Q90_edu_p
+            experience=Q90_exp SE_exp=Q90_exp_se Probt_exp=Q90_exp_p
+            male=Q90_male SE_male=Q90_male_se Probt_male=Q90_male_p));
+  by _TYPE_;
+run;
+
+proc print data=summary noobs;
+  var _TYPE_ OLS_edu Q10_edu Q50_edu Q90_edu
+      OLS_exp Q10_exp Q50_exp Q90_exp
+      OLS_male Q10_male Q50_male Q90_male;
+  title "OLS vs Quantile Regression Coefficients";
+run;
+
+/* KDE 시각화 */
+proc sgplot data=kde_gender;
+  series x=x y=y / group=group;
+  title "Gender-wise Log-Income KDE";
+  xaxis label="Log Income"; yaxis label="Density";
+run;
+
+/* 불평등 지수 시각화 */
+data ineq;
+  set ineq_table; /* Gini·Atkinson 테이블 */
+run;
+proc sgplot data=ineq;
+  vbar Measure / response=Estimate datalabel;
+  highlow y=Estimate low=CI_Lower high=CI_Upper / type=line;
+  title "Income Inequality Indices (95% CI)";
+  yaxis label="Index Value";
+run;
+
+/* 분위 회귀 계수 비교 */
+proc transpose data=summary out=coef_t(drop=_NAME_);
+  by _TYPE_;
+  var OLS_edu Q10_edu Q50_edu Q90_edu;
+run;
+proc sgplot data=coef_t;
+  series x=_TYPE_ y=COL1 / group=_LABEL_;
+  title "Education Coefficients: OLS vs Quantile";
+  xaxis discreteorder=data display=(nolabel);
+  yaxis label="Coefficient";
+run;
