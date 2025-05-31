@@ -1,0 +1,101 @@
+/* 1. 데이터 로딩 및 전처리 */
+/* CSV 파일로부터 데이터를 로드하고 결측치·이상치 처리 */
+
+proc import datafile="your_path.csv"
+    out=unemp_raw
+    dbms=csv
+    replace;
+    getnames=yes;
+run;
+
+data unemp;
+    set unemp_raw(keep=State Date Unemployment_Rate);
+    /* 결측치 제거 */
+    if Unemployment_Rate = . then delete;
+    /* 날짜 형식 변환 */
+    Date = input(Date, yymmdd10.);
+    format Date yymmdd10.;
+run;
+
+/* 이상치 제거: IQR 방법 */
+proc univariate data=unemp noprint;
+    var Unemployment_Rate;
+    output out=qt pctlpts=25 75 pctlpre=P_;
+run;
+
+data unemp_clean;
+    if _n_=1 then set qt;
+    set unemp;
+    iqr = P_75 - P_25;
+    lower = P_25 - 1.5*iqr;
+    upper = P_75 + 1.5*iqr;
+    if Unemployment_Rate < lower or Unemployment_Rate > upper then delete;
+run;
+
+
+/* 2. 분포 적합도 검정 */
+/* 히스토그램, Q–Q 플롯 및 검정 통계량 출력 */
+
+proc univariate data=unemp_clean noprint;
+    var Unemployment_Rate;
+    histogram / normal(exp) 
+                midpoints=1 to 15 by 0.5
+                odstitle="Histogram with Normal & Exponential Fit";
+    qqplot / normal(mu=est sigma=est) 
+             odstitle="Normal Q–Q Plot";
+    /* Shapiro-Wilk 정규성 검정 */
+    output out=dist_stats
+        mean=mu std=sd
+        ;
+run;
+
+/* Kolmogorov–Smirnov 검정 (정규분포 기준) */
+proc npar1way data=unemp_clean edf;
+    var Unemployment_Rate;
+    ods select TestsForLocation;
+run;
+
+/* AIC/BIC 계산을 위한 로그우도 추출 예시 (정규분포만) */
+proc model data=unemp_clean;
+    parms mu=5 sd=2;
+    unemployment = mu + sd*norminv(u); /* 모의식: 로그우도 계산은 별도 매크로 필요 */
+quit;
+
+
+/* 3. 예측 구간 계산 (캘리포니아 주) */
+/* 신뢰구간(CI)과 예측구간(PI) 계산 */
+
+proc sort data=unemp_clean; by State; run;
+
+proc means data=unemp_clean n mean std clm clp alpha=0.10 alpha=0.05 alpha=0.01;
+    where State="California";
+    var Unemployment_Rate;
+    title "캘리포니아 주 실업률 90%, 95%, 99% 신뢰구간(CLM) 및 예측구간(CLP)";
+run;
+
+/* 4. 극단값 확률 계산 및 시각화 */
+/* t-분포 가정 하에 자유도(df), 위치(mu), 척도(sd) 사용 */
+
+data probs;
+    set dist_stats; /* mu, sd 추출 */
+    df = 1000; /* 충분히 큰 샘플 가정 */
+    /* 실업률 > 10% 확률 */
+    p_above_10 = 1 - cdf('T', (10 - mu)/sd, df);
+    /* 실업률 < 5% 확률 */
+    p_below_5  = cdf('T', (5  - mu)/sd, df);
+run;
+
+proc print data=probs noobs;
+    var p_above_10 p_below_5;
+    title "극단값 확률 계산 결과 (t-분포 가정)";
+run;
+
+/* 확률밀도 곡선 시각화 */
+proc sgplot data=probs;
+    /* 외부 데이터셋 생성 후 사용 권장 */
+    /* 예: pdf 계산된 데이터셋 사용 */
+    /* 아래는 예시 코드 구조 */
+    series x=Unemployment_Rate y=Density / datalabel;
+    band x=Unemployment_Rate lower=LowShade upper=HighShade / transparency=0.5 legendlabel="Extreme Regions";
+    title "실업률 분포밀도와 극단값 확률 음영";
+run;
