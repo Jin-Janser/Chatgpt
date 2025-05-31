@@ -1,0 +1,79 @@
+# 1. 데이터 로딩 및 전처리
+library(tidyverse)
+library(mice)
+library(car)         # leveneTest
+library(effsize)     # cohen.d
+library(Kendall)     # MannKendall
+library(multcomp)    # TukeyHSD
+library(rstatix)     # eta_squared
+
+df <- read.csv("WHO_vaccine.csv", stringsAsFactors=FALSE) %>%
+  select(Country, Region, Year, Vaccine_Type, Coverage_Rate)
+
+# 결측치 다중대체
+imp <- mice(df, m=5, method='pmm', seed=123)
+df <- complete(imp)
+
+# 이상치 제거 (IQR)
+Q <- quantile(df$Coverage_Rate, probs=c(0.25,0.75))
+IQR <- Q[2] - Q[1]
+df <- df %>%
+  filter(Coverage_Rate >= Q[1] - 1.5*IQR,
+         Coverage_Rate <= Q[2] + 1.5*IQR)
+
+# 그룹별 기술통계
+df %>% 
+  filter(Vaccine_Type=="DTP3", Region %in% c("A","B")) %>%
+  group_by(Region) %>%
+  summarise(n=n(), mean=mean(Coverage_Rate), sd=sd(Coverage_Rate))
+
+# 2. Task 1: 등분산성 검정 + Welch t-검정
+a <- df %>% filter(Region=="A", Vaccine_Type=="DTP3") %>% pull(Coverage_Rate)
+b <- df %>% filter(Region=="B", Vaccine_Type=="DTP3") %>% pull(Coverage_Rate)
+levene_p <- leveneTest(Coverage_Rate~Region, data=df %>% filter(Vaccine_Type=="DTP3"))$`Pr(>F)`[1]
+tt <- t.test(a, b, var.equal=FALSE)
+d <- cohen.d(a, b)$estimate
+cat("Levene p =", levene_p, "\n",
+    "t =", tt$statistic, "df =", tt$parameter, "p =", tt$p.value, "d =", d, "\n")
+
+# 3. Task 2: MCV1 연도별 추세 분석
+country <- "Country_X"
+mc <- df %>% filter(Country==country, Vaccine_Type=="MCV1")
+lm_mod <- lm(Coverage_Rate ~ Year, data=mc)
+summary(lm_mod)             # β1, p-value, R²
+mk <- MannKendall(mc$Coverage_Rate)
+cat("Kendall τ =", mk$tau, "p =", mk$sl, "\n")
+
+# 4. Task 3: ANOVA 및 Tukey HSD
+sub <- df %>% filter(Vaccine_Type %in% c("BCG","DTP3","MCV1"))
+aov_mod <- aov(Coverage_Rate ~ Vaccine_Type, data=sub)
+anova_res <- summary(aov_mod)
+eta2 <- eta_squared(aov_mod, partial=FALSE)
+tukey <- TukeyHSD(aov_mod)
+print(anova_res); print(eta2); print(tukey)
+
+# 5. 시각화
+library(ggplot2)
+# Boxplot
+ggplot(df %>% filter(Vaccine_Type=="DTP3"), 
+       aes(Region, Coverage_Rate, fill=Region)) +
+  geom_boxplot() + theme_minimal() +
+  labs(title="DTP3 Coverage by Region", y="Coverage Rate (%)")
+
+# Trend plot
+ggplot(mc, aes(Year, Coverage_Rate)) +
+  geom_point() +
+  geom_smooth(method="lm", level=0.95, color="blue") +
+  labs(title=paste(country,"MCV1 Coverage Trend"), y="Coverage Rate (%)")
+
+# Heatmap of Tukey p-values
+pv <- as.data.frame(tukey$Vaccine_Type[,4])
+names(pv) <- "p.adj"
+pv$comparison <- rownames(pv)
+pv <- separate(pv, comparison, into=c("group1","group2"), sep="-")
+ggplot(pv, aes(group1, group2, fill=p.adj)) +
+  geom_tile() +
+  geom_text(aes(label=round(p.adj,3))) +
+  scale_fill_gradient(low="white", high="red") +
+  labs(title="Tukey HSD p-values", x="", y="")
+
