@@ -1,0 +1,52 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.tsa.seasonal import STL
+from pmdarima import auto_arima
+from arch import arch_model
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_squared_error
+
+# 1. 데이터 준비
+df = pd.read_csv('DJI_weekly.csv', parse_dates=['Date'], index_col='Date')
+df = df.asfreq('W-MON')                     # 주간 주기 설정
+df['Adj Close'] = df['Adj Close'].interpolate()  
+df['r'] = np.log(df['Adj Close'] / df['Adj Close'].shift(1))
+df = df.dropna()
+# 이상치 제거 (IQR×1.5)
+Q1, Q3 = df['r'].quantile([0.25,0.75])
+IQR = Q3 - Q1
+df = df[(df['r'] >= Q1-1.5*IQR) & (df['r'] <= Q3+1.5*IQR)]
+
+# 2. STL 분해
+stl = STL(df['r'], period=52, robust=True).fit()
+stl.plot()
+plt.show()
+
+# 3. ARIMA 모델 선택 및 예측
+plot_acf(df['r'], lags=50); plot_pacf(df['r'], lags=50); plt.show()
+arima = auto_arima(df['r'], seasonal=False, ic='bic', stepwise=True)
+print("ARIMA order:", arima.order, "AIC:", arima.aic(), "BIC:", arima.bic())
+fcast, conf = arima.predict(n_periods=8, return_conf_int=True)
+index = pd.date_range(df.index[-1]+pd.Timedelta(weeks=1), periods=8, freq='W-MON')
+pd.Series(fcast, index=index).plot(label='Forecast')
+plt.fill_between(index, conf[:,0], conf[:,1], color='pink', alpha=0.3)
+plt.legend(); plt.show()
+
+# 4. ARCH-LM 검정 및 GARCH(1,1)
+from arch.unitroot import ar_select_order
+from arch.univariate import arch_lm_test
+lm_test = arch_lm_test(df['r'], lags=12)
+print("ARCH-LM p-value:", lm_test['p-value'])
+garch = arch_model(df['r'], vol='GARCH', p=1, q=1, dist='StudentsT').fit(disp='off')
+print(garch.summary())
+alpha, beta = garch.params['alpha[1]'], garch.params['beta[1]']
+print("Persistence (α+β):", alpha+beta)
+
+# 5. GARCH 조건부 변동성 시각화
+plt.figure(figsize=(10,4))
+plt.plot(garch.conditional_volatility, color='red')
+plt.title('GARCH(1,1) Conditional Volatility')
+plt.show()
