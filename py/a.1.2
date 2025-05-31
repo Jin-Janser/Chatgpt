@@ -1,0 +1,50 @@
+import pandas as pd
+import numpy as np
+from scipy import stats
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 데이터 생성 (실제 환경에서는 파일에서 로딩)
+np.random.seed(0)
+data = {
+    'gender': np.random.choice(['male', 'female'], 1000),
+    'math score': np.random.normal(65, 15, 1000).clip(0, 100),
+    'reading score': np.random.normal(70, 12, 1000).clip(0, 100),
+    'writing score': np.random.normal(68, 14, 1000).clip(0, 100)
+}
+df = pd.DataFrame(data)
+
+# 기술통계량 계산
+stats_summary = df[['math score', 'reading score', 'writing score']].describe(
+    percentiles=[.25, .5, .75]
+).T
+
+# 성별별 평균, 표준편차 계산
+grouped_stats = df.groupby('gender')[
+    ['math score', 'reading score', 'writing score']
+].agg(['mean', 'std'])
+
+# 성별별 t-검정 수행
+male_scores = df[df['gender'] == 'male']
+female_scores = df[df['gender'] == 'female']
+test_results = {}
+
+for subject in ['math score', 'reading score', 'writing score']:
+    t_stat, p_val = stats.ttest_ind(
+        male_scores[subject], 
+        female_scores[subject], 
+        equal_var=False  # Welch's t-test 사용
+    )
+    test_results[subject] = {
+        't_statistic': t_stat, 
+        'p_value': p_val
+    }
+
+# 결과 출력
+print("=== 기술통계량 요약 ===")
+print(stats_summary)
+print("\n=== 성별별 통계량 ===")
+print(grouped_stats)
+print("\n=== t-검정 결과 ===")
+for subject, result in test_results.items():
+    print(f"{subject}: t={result['t_statistic']:.3f}, p={result['p_value']:.3f}")
